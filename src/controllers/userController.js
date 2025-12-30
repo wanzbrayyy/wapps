@@ -1,38 +1,6 @@
-const User = require('../models/user');
-const cloudinary = require('../config/cloudinary');
-const { Readable } = require('stream');
+const User = require('../models/User');
+const cloudinary = require('cloudinary').v2; 
 
-// Helper function untuk upload stream ke Cloudinary
-const streamUpload = (buffer) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: process.env.CLOUDINARY_UPLOAD_FOLDER },
-      (error, result) => {
-        if (result) {
-          resolve(result);
-        } else {
-          reject(error);
-        }
-      }
-    );
-    Readable.from(buffer).pipe(stream);
-  });
-};
-
-const getProfile = async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id)
-      .select('-password')
-      .populate('followers', 'username profilePic fullName')
-      .populate('following', 'username profilePic fullName');
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
-// Tambahan untuk menangani GET /api/users/ (Search/List User)
 const getAllUsers = async (req, res) => {
   try {
     const keyword = req.query.search
@@ -44,12 +12,24 @@ const getAllUsers = async (req, res) => {
         }
       : {};
 
-    // Cari user kecuali diri sendiri
     const users = await User.find(keyword)
       .find({ _id: { $ne: req.user.id } })
       .select('username fullName profilePic email');
 
     res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id)
+      .select('-password')
+      .populate('followers', 'username profilePic fullName')
+      .populate('following', 'username profilePic fullName');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -103,26 +83,25 @@ const updateProfile = async (req, res) => {
 
 const uploadProfilePic = async (req, res) => {
   try {
-    // Karena pakai memoryStorage, file ada di req.file.buffer
+    // Dengan multer-storage-cloudinary, req.file sudah berisi info file dari Cloudinary
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
     const user = await User.findById(req.user.id);
     
-    // Hapus foto lama di Cloudinary jika ada (dan bukan default)
+    // Hapus foto lama di Cloudinary jika ada
     if (user.cloudinaryId) {
-      await cloudinary.uploader.destroy(user.cloudinaryId);
+      // Hapus di background, tidak perlu await agar respon cepat
+      cloudinary.uploader.destroy(user.cloudinaryId).catch(err => console.log(err));
     }
 
-    // Upload Stream (Buffer to Cloudinary)
-    const result = await streamUpload(req.file.buffer);
-
-    user.profilePic = result.secure_url;
-    user.cloudinaryId = result.public_id;
+    // req.file.path = URL gambar di Cloudinary
+    // req.file.filename = Public ID di Cloudinary
+    user.profilePic = req.file.path;
+    user.cloudinaryId = req.file.filename;
     await user.save();
 
     res.json({ profilePic: user.profilePic });
   } catch (error) {
-    console.error(error); // Log error di Vercel Console
     res.status(500).json({ message: 'Upload failed: ' + error.message });
   }
 };
@@ -178,7 +157,7 @@ const unfollowUser = async (req, res) => {
 };
 
 module.exports = {
-  getAllUsers, // Export fungsi baru
+  getAllUsers,
   getProfile,
   updateProfile,
   uploadProfilePic,
