@@ -1,7 +1,5 @@
 const multer = require('multer');
 const path = require('path');
-
-// PENTING: Gunakan memoryStorage untuk Vercel (Serverless)
 const storage = multer.memoryStorage();
 
 function checkFileType(file, cb) {
@@ -18,7 +16,7 @@ function checkFileType(file, cb) {
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // Limit 5MB
+  limits: { fileSize: 60 * 1024 * 1024 }, 
   fileFilter: function (req, file, cb) {
     checkFileType(file, cb);
   },
