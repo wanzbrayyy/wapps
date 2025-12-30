@@ -15,8 +15,8 @@ const sendMessage = async (req, res) => {
     });
 
     const fullChat = await Chat.findById(newChat._id)
-      .populate('sender', 'username profilePic')
-      .populate('receiver', 'username profilePic');
+      .populate('sender', 'username profilePic fullName')
+      .populate('receiver', 'username profilePic fullName');
 
     res.status(201).json(fullChat);
   } catch (error) {
@@ -39,6 +39,12 @@ const getMessages = async (req, res) => {
     .populate('sender', 'username profilePic')
     .populate('receiver', 'username profilePic');
 
+    // Mark messages as read
+    await Chat.updateMany(
+      { sender: userId, receiver: myId, isRead: false },
+      { $set: { isRead: true } }
+    );
+
     res.json(messages);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -49,28 +55,81 @@ const getConversations = async (req, res) => {
   try {
     const currentUserId = req.user.id;
     
-    // Cari semua chat yang melibatkan user saat ini
-    const chats = await Chat.find({
-      $or: [{ sender: currentUserId }, { receiver: currentUserId }]
-    }).sort({ createdAt: -1 });
+    // Agregasi untuk mendapatkan last message per user
+    const conversations = await Chat.aggregate([
+      {
+        $match: {
+          $or: [
+            { sender: new mongoose.Types.ObjectId(currentUserId) },
+            { receiver: new mongoose.Types.ObjectId(currentUserId) }
+          ]
+        }
+      },
+      {
+        $sort: { createdAt: -1 }
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $eq: ["$sender", new mongoose.Types.ObjectId(currentUserId)] },
+              "$receiver",
+              "$sender"
+            ]
+          },
+          lastMessage: { $first: "$message" },
+          lastMessageId: { $first: "$_id" },
+          timestamp: { $first: "$createdAt" },
+          unreadCount: {
+            $sum: {
+              $cond: [
+                { 
+                  $and: [
+                    { $eq: ["$receiver", new mongoose.Types.ObjectId(currentUserId)] },
+                    { $eq: ["$isRead", false] }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          }
+        }
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "userDetails"
+        }
+      },
+      {
+        $unwind: "$userDetails"
+      },
+      {
+        $project: {
+          userId: "$userDetails._id",
+          username: "$userDetails.username",
+          fullName: "$userDetails.fullName",
+          profilePic: "$userDetails.profilePic",
+          lastMessage: 1,
+          timestamp: 1,
+          unreadCount: 1
+        }
+      },
+      {
+        $sort: { timestamp: -1 }
+      }
+    ]);
 
-    const userIds = new Set();
-    chats.forEach(chat => {
-      const otherUserId = chat.sender.toString() === currentUserId 
-        ? chat.receiver.toString() 
-        : chat.sender.toString();
-      userIds.add(otherUserId);
-    });
-
-    const users = await User.find({ _id: { $in: Array.from(userIds) } })
-      .select('username fullName profilePic email');
-
-    res.json(users);
+    res.json(conversations);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
+const mongoose = require('mongoose');
 module.exports = {
   sendMessage,
   getMessages,

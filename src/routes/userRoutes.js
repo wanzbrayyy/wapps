@@ -4,7 +4,9 @@ const {
   getProfile, 
   updateProfile, 
   uploadProfilePic,
-  getUserById 
+  getUserById,
+  followUser,
+  unfollowUser
 } = require('../controllers/userController');
 const { protect } = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware');
@@ -13,5 +15,7 @@ router.get('/profile', protect, getProfile);
 router.put('/profile', protect, updateProfile);
 router.post('/upload-profile-pic', protect, upload.single('profilePic'), uploadProfilePic);
 router.get('/:id', protect, getUserById);
+router.post('/:id/follow', protect, followUser);
+router.post('/:id/unfollow', protect, unfollowUser);
 
 module.exports = router;

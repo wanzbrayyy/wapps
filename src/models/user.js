@@ -38,7 +38,15 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
-  resetPasswordToken: String, 
+  followers: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  following: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  resetPasswordToken: String,
   resetPasswordExpire: Date,
   isVerified: {
     type: Boolean,
