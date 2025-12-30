@@ -56,26 +56,28 @@ const getUserById = async (req, res) => {
 
 const updateProfile = async (req, res) => {
   try {
+    const { fullName, bio, birthDate, gender, interestedIn, location, zodiac, mbti } = req.body;
+    
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    user.fullName = req.body.fullName || user.fullName;
-    user.bio = req.body.bio || user.bio;
-    
-    if (req.body.username && req.body.username !== user.username) {
-        const exists = await User.findOne({ username: req.body.username });
-        if(exists) return res.status(400).json({ message: "Username already taken"});
-        user.username = req.body.username;
+    user.fullName = fullName || user.fullName;
+    user.bio = bio || user.bio;
+    user.birthDate = birthDate || user.birthDate;
+    user.gender = gender || user.gender;
+    user.interestedIn = interestedIn || user.interestedIn;
+    user.zodiac = zodiac || user.zodiac;
+    user.mbti = mbti || user.mbti;
+
+    if (location && location.coordinates) {
+      user.location = {
+        type: 'Point',
+        coordinates: location.coordinates
+      };
     }
 
     const updatedUser = await user.save();
-    res.json({
-      _id: updatedUser._id,
-      username: updatedUser.username,
-      fullName: updatedUser.fullName,
-      bio: updatedUser.bio,
-      profilePic: updatedUser.profilePic
-    });
+    res.json(updatedUser);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

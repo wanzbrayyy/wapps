@@ -11,13 +11,13 @@ const server = http.createServer(app);
 const io = new Server(server, {
   pingTimeout: 60000,
   cors: {
-    origin: "*", 
+    origin: "*",
     methods: ["GET", "POST"]
   },
 });
 
 io.on("connection", (socket) => {
-  console.log("User connected to socket");
+  console.log("Socket connected:", socket.id);
 
   socket.on("setup", (userData) => {
     socket.join(userData._id);
@@ -28,28 +28,34 @@ io.on("connection", (socket) => {
     socket.join(room);
   });
 
-  socket.on("new message", (newMessageReceived) => {
-    var chat = newMessageReceived.chat;
-
-    if (!chat.users) return;
-
-    chat.users.forEach((user) => {
-      if (user._id == newMessageReceived.sender._id) return;
-      socket.in(user._id).emit("message received", newMessageReceived);
-    });
-  });
-
+  // Typing Indicators
   socket.on("typing", (room) => socket.in(room).emit("typing"));
   socket.on("stop typing", (room) => socket.in(room).emit("stop typing"));
 
-  socket.off("setup", (userData) => {
-    console.log("User disconnected");
-    socket.leave(userData._id);
+  // New Message
+  socket.on("new message", (newMessageReceived) => {
+    var chat = newMessageReceived;
+    if (!chat.receiver) return;
+    socket.in(chat.receiver._id).emit("message received", newMessageReceived);
+  });
+
+  // Screen Sharing Signals (WebRTC Relay)
+  socket.on("screen_signal", (data) => {
+    // data: { roomId, signal, senderId }
+    socket.to(data.roomId).emit("screen_signal_received", data);
+  });
+  
+  // Room Live Events
+  socket.on("join_room_live", (roomId) => {
+    socket.join(roomId);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Socket disconnected");
   });
 });
 
 const PORT = process.env.PORT || 3000;
-
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
