@@ -1,22 +1,6 @@
 const User = require('../models/user');
 const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier'); 
-const uploadToCloudinary = (buffer) => {
-  return new Promise((resolve, reject) => {
-    const uploadStream = cloudinary.uploader.upload_stream(
-      { folder: process.env.CLOUDINARY_UPLOAD_FOLDER },
-      (error, result) => {
-        if (result) resolve(result);
-        else reject(error);
-      }
-    );
-    // Tulis buffer ke stream
-    const { Readable } = require('stream');
-    const stream = Readable.from(buffer);
-    stream.pipe(uploadStream);
-  });
-};
-// ------------------------------------------------
+const fs = require('fs');
 
 const getProfile = async (req, res) => {
   try {
@@ -57,22 +41,26 @@ const updateProfile = async (req, res) => {
 
 const uploadProfilePic = async (req, res) => {
   try {
-    // Cek req.file bukan req.file.path karena memoryStorage
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
     const user = await User.findById(req.user.id);
     
-    // Hapus foto lama di cloudinary jika ada
     if (user.cloudinaryId) {
       await cloudinary.uploader.destroy(user.cloudinaryId);
     }
 
-    // Upload buffer ke Cloudinary
-    const result = await uploadToCloudinary(req.file.buffer);
+    const result = await cloudinary.uploader.upload(req.file.path, {
+      folder: process.env.CLOUDINARY_UPLOAD_FOLDER,
+    });
 
     user.profilePic = result.secure_url;
     user.cloudinaryId = result.public_id;
     await user.save();
+    
+    // Hapus file lokal setelah upload (jika menggunakan diskStorage)
+    if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+    }
 
     res.json({ profilePic: user.profilePic });
   } catch (error) {
