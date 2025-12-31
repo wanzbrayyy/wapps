@@ -1,4 +1,4 @@
-cat << 'EOF' > src/routes/roomRoutes.js
+
 const express = require('express');
 const router = express.Router();
 const { 
@@ -35,4 +35,3 @@ router.get('/:id/messages', protect, getRoomMessages);
 router.post('/:id/messages', protect, sendRoomMessage);
 
 module.exports = router;
-EOF
