@@ -1,3 +1,4 @@
+cat << 'EOF' > src/models/Room.js
 const mongoose = require('mongoose');
 
 const eventSchema = new mongoose.Schema({
@@ -14,16 +15,16 @@ const roomSchema = new mongoose.Schema({
   creator: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   isActive: { type: Boolean, default: true },
   
-  // Participants & Roles
+  roomImage: { type: String, default: 'https://images.unsplash.com/photo-1579546929518-9e396f3cc809' },
+
   participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   admins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   moderators: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   
-  // Kick/Ban
   bannedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
-  // Scheduled Events
   events: [eventSchema]
 }, { timestamps: true });
 
 module.exports = mongoose.model('Room', roomSchema);
+EOF

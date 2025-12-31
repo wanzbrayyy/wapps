@@ -4,38 +4,18 @@ const User = require('../models/user');
 
 const createRoom = async (req, res) => {
   try {
-    const { title, category, description, roomImage } = req.body;
+    const { title, category, description } = req.body;
     
     const newRoom = await Room.create({
       title,
       category,
       description,
-      roomImage,
       creator: req.user.id,
       participants: [req.user.id],
       admins: [req.user.id]
     });
 
     res.status(201).json(newRoom);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
-const updateRoomImage = async (req, res) => {
-  try {
-    const { roomId, imageUrl } = req.body;
-    const room = await Room.findById(roomId);
-
-    if (!room) return res.status(404).json({ message: "Room not found" });
-    const isCreator = room.creator.toString() === req.user.id;
-    if (!isCreator && !room.admins.includes(req.user.id)) {
-      return res.status(403).json({ message: "Not authorized" });
-    }
-
-    room.roomImage = imageUrl;
-    await room.save();
-    res.json(room);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -274,7 +254,6 @@ const getRoomMessages = async (req, res) => {
 
 module.exports = {
   createRoom,
-  updateRoomImage,
   getAllRooms,
   getRoomById,
   joinRoom,
