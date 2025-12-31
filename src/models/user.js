@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
@@ -12,39 +13,45 @@ const userSchema = new mongoose.Schema({
   following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   coins: { type: Number, default: 1000 },
   
-  // Dating Profile Fields
   birthDate: { type: Date },
   gender: { type: String, enum: ['Man', 'Woman', 'Other'] },
   interestedIn: { type: String, enum: ['Men', 'Women', 'Everyone'], default: 'Everyone' },
 
-  // Location for Nearby Users
   location: {
     type: { type: String, enum: ['Point'], default: 'Point' },
-    coordinates: { type: [Number], default: [0, 0] } // [longitude, latitude]
+    coordinates: { type: [Number], default: [0, 0] }
   },
   
-  // Compatibility Fields
-  zodiac: { type: String, default: '' },
-  mbti: { type: String, default: '' },
-  
-  // Matchmaking Data
+  travelLocation: {
+    type: { type: String, enum: ['Point'] },
+    coordinates: { type: [Number] }
+  },
+
+  height: { type: Number },
+  education: { type: String, default: '' },
+  religion: { type: String, default: '' },
+  smoking: { type: String, enum: ['Yes', 'No', 'Sometimes'], default: 'No' },
+  relationshipIntent: { type: String, enum: ['Serious', 'Casual', 'Friends'], default: 'Serious' },
+
   swiped: [{
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    action: { type: String, enum: ['like', 'dislike'] }
+    action: { type: String, enum: ['like', 'dislike', 'superlike'] }
   }],
   matches: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
-  // Profile Visitors
-  profileVisitors: [{
-    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    date: { type: Date, default: Date.now }
+  boostExpiresAt: { type: Date },
+
+  spotifyTopTracks: [{
+    trackName: String,
+    artist: String,
+    albumArtUrl: String
   }],
 
   resetPasswordToken: String,
   resetPasswordExpire: Date,
 }, { timestamps: true });
 
-// Geospatial index for nearby queries
 userSchema.index({ location: '2dsphere' });
+userSchema.index({ travelLocation: '2dsphere' });
 
 module.exports = mongoose.model('User', userSchema);

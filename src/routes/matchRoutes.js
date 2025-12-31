@@ -7,14 +7,25 @@ const {
   getWhoLikedMe,
   logProfileVisit,
   findBlindDate,
+  getTopPicks,
+  rewindLastSwipe,
+  activateBoost,
+  setTravelMode,
+  saveSpotifyData
 } = require('../controllers/matchController');
 const { protect } = require('../middleware/authMiddleware');
 
 router.get('/discovery', protect, getDiscoveryQueue);
-router.post('/swipe', protect, swipeAction);
 router.get('/matches', protect, getMatches);
 router.get('/likes', protect, getWhoLikedMe);
+router.get('/top-picks', protect, getTopPicks);
+
+router.post('/swipe', protect, swipeAction);
 router.post('/visit/:id', protect, logProfileVisit);
 router.post('/blind-date/find', protect, findBlindDate);
+router.post('/rewind', protect, rewindLastSwipe);
+router.post('/boost', protect, activateBoost);
+router.post('/travel', aprotect, setTravelMode);
+router.post('/spotify', protect, saveSpotifyData);
 
 module.exports = router;

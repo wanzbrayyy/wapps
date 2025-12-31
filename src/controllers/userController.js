@@ -56,25 +56,21 @@ const getUserById = async (req, res) => {
 
 const updateProfile = async (req, res) => {
   try {
-    const { fullName, bio, birthDate, gender, interestedIn, location, zodiac, mbti } = req.body;
+    const { fullName, bio, birthDate, gender, interestedIn, height, education, religion, smoking, relationshipIntent } = req.body;
     
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    user.fullName = fullName || user.fullName;
-    user.bio = bio || user.bio;
-    user.birthDate = birthDate || user.birthDate;
-    user.gender = gender || user.gender;
-    user.interestedIn = interestedIn || user.interestedIn;
-    user.zodiac = zodiac || user.zodiac;
-    user.mbti = mbti || user.mbti;
-
-    if (location && location.coordinates) {
-      user.location = {
-        type: 'Point',
-        coordinates: location.coordinates
-      };
-    }
+    user.fullName = fullName ?? user.fullName;
+    user.bio = bio ?? user.bio;
+    user.birthDate = birthDate ?? user.birthDate;
+    user.gender = gender ?? user.gender;
+    user.interestedIn = interestedIn ?? user.interestedIn;
+    user.height = height ?? user.height;
+    user.education = education ?? user.education;
+    user.religion = religion ?? user.religion;
+    user.smoking = smoking ?? user.smoking;
+    user.relationshipIntent = relationshipIntent ?? user.relationshipIntent;
 
     const updatedUser = await user.save();
     res.json(updatedUser);
@@ -85,19 +81,12 @@ const updateProfile = async (req, res) => {
 
 const uploadProfilePic = async (req, res) => {
   try {
-    // Dengan multer-storage-cloudinary, req.file sudah berisi info file dari Cloudinary
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
     const user = await User.findById(req.user.id);
-    
-    // Hapus foto lama di Cloudinary jika ada
     if (user.cloudinaryId) {
-      // Hapus di background, tidak perlu await agar respon cepat
       cloudinary.uploader.destroy(user.cloudinaryId).catch(err => console.log(err));
     }
-
-    // req.file.path = URL gambar di Cloudinary
-    // req.file.filename = Public ID di Cloudinary
     user.profilePic = req.file.path;
     user.cloudinaryId = req.file.filename;
     await user.save();

@@ -2,6 +2,7 @@ const User = require('../models/user');
 const Like = require('../models/like');
 
 const calculateAge = (birthDate) => {
+  if (!birthDate) return null;
   const ageDifMs = Date.now() - new Date(birthDate).getTime();
   const ageDate = new Date(ageDifMs);
   return Math.abs(ageDate.getUTCFullYear() - 1970);
@@ -10,8 +11,7 @@ const calculateAge = (birthDate) => {
 const getDiscoveryQueue = async (req, res) => {
   try {
     const currentUser = await User.findById(req.user.id);
-
-    const { minAge = 18, maxAge = 99, gender, distance = 50 } = req.query; // distance in km
+    const { minAge = 18, maxAge = 99, gender, distance = 50, heightMin, heightMax, education, religion, smoking } = req.query;
 
     const ageFilter = {
       $gte: new Date(new Date().setFullYear(new Date().getFullYear() - maxAge)),
@@ -19,39 +19,35 @@ const getDiscoveryQueue = async (req, res) => {
     };
 
     const alreadySwiped = currentUser.swiped.map(s => s.user);
+    const locationToUse = currentUser.travelLocation || currentUser.location;
 
     let filter = {
       _id: { $ne: req.user.id, $nin: alreadySwiped },
       birthDate: ageFilter,
       location: {
         $near: {
-          $geometry: currentUser.location,
-          $maxDistance: distance * 1000 // convert km to meters
+          $geometry: locationToUse,
+          $maxDistance: distance * 1000
         }
       }
     };
 
-    if (gender && gender !== 'Everyone') {
-      filter.gender = gender;
-    }
+    if (gender && gender !== 'Everyone') filter.gender = gender;
+    if (heightMin) filter.height = { ...filter.height, $gte: parseInt(heightMin) };
+    if (heightMax) filter.height = { ...filter.height, $lte: parseInt(heightMax) };
+    if (education) filter.education = education;
+    if (religion) filter.religion = religion;
+    if (smoking) filter.smoking = smoking;
     
-    const users = await User.find(filter)
-      .select('fullName username profilePic bio birthDate zodiac mbti')
-      .limit(20);
+    const boostedUsers = await User.find({ ...filter, boostExpiresAt: { $gt: new Date() } }).limit(5).select('-password');
+    const regularUsers = await User.find({ ...filter, boostExpiresAt: { $eq: null } }).limit(20).select('-password');
+    
+    const combinedUsers = [...boostedUsers, ...regularUsers];
 
-    const usersWithCompatibility = users.map(user => {
-      let score = 50;
-      if (currentUser.zodiac && user.zodiac && currentUser.zodiac === user.zodiac) score += 25;
-      if (currentUser.mbti && user.mbti && currentUser.mbti === user.mbti) score += 25;
-      
-      return {
-        ...user.toObject(),
-        age: calculateAge(user.birthDate),
-        compatibility: score
-      };
-    });
-
-    res.json(usersWithCompatibility);
+    res.json(combinedUsers.map(user => ({
+      ...user.toObject(),
+      age: calculateAge(user.birthDate)
+    })));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -60,20 +56,17 @@ const getDiscoveryQueue = async (req, res) => {
 const swipeAction = async (req, res) => {
   try {
     const { targetUserId, action } = req.body;
-    const currentUser = await User.findById(req.user.id);
+    
+    await User.findByIdAndUpdate(req.user.id, { $push: { swiped: { user: targetUserId, action } } });
 
-    currentUser.swiped.push({ user: targetUserId, action });
-    await currentUser.save();
-
-    if (action === 'like') {
-      await Like.create({ liker: req.user.id, liked: targetUserId });
-
+    if (action === 'like' || action === 'superlike') {
+      await Like.create({ liker: req.user.id, liked: targetUserId, type: action });
       const mutualLike = await Like.findOne({ liker: targetUserId, liked: req.user.id });
 
       if (mutualLike) {
         await User.findByIdAndUpdate(req.user.id, { $push: { matches: targetUserId } });
         await User.findByIdAndUpdate(targetUserId, { $push: { matches: req.user.id } });
-        return res.json({ match: true });
+        return res.json({ match: true, superlike: mutualLike.type === 'superlike' || action === 'superlike' });
       }
     }
     res.json({ match: false });
@@ -117,7 +110,7 @@ const logProfileVisit = async (req, res) => {
         $push: {
           profileVisitors: {
             $each: [{ user: req.user.id, date: new Date() }],
-            $slice: -50 // Keep only the last 50 visitors
+            $slice: -50
           }
         }
       }
@@ -130,24 +123,72 @@ const logProfileVisit = async (req, res) => {
 
 const findBlindDate = async (req, res) => {
   try {
-    // This is a simplified version. A real-world scenario would use a queue system (e.g., Redis)
-    const currentUser = await User.findById(req.user.id);
-    const potentialPartners = await User.find({
-      _id: { $ne: req.user.id },
-      // Add criteria: online status, not matched, not swiped etc.
-    }).limit(10); 
-    
-    if (potentialPartners.length === 0) {
-      return res.status(404).json({ message: 'No users available for blind date now' });
-    }
-
+    const potentialPartners = await User.find({ _id: { $ne: req.user.id } }).limit(10); 
+    if (potentialPartners.length === 0) return res.status(404).json({ message: 'No users available' });
     const partner = potentialPartners[Math.floor(Math.random() * potentialPartners.length)];
-    
-    res.json({
-      message: 'Partner found!',
-      partnerId: partner._id,
-      username: partner.username
+    res.json({ partnerId: partner._id, username: partner.username });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getTopPicks = async (req, res) => {
+  try {
+    const users = await User.find({ _id: { $ne: req.user.id } }).limit(10).select('-password');
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const rewindLastSwipe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const lastSwipe = user.swiped.pop();
+    if (lastSwipe) {
+      if (lastSwipe.action === 'like' || lastSwipe.action === 'superlike') {
+        await Like.deleteOne({ liker: user._id, liked: lastSwipe.user });
+      }
+      await user.save();
+    }
+    res.status(200).json({ message: 'Rewind successful' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const activateBoost = async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.user.id, {
+      boostExpiresAt: new Date(Date.now() + 30 * 60 * 1000)
     });
+    res.status(200).json({ message: 'Boost activated for 30 minutes' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const setTravelMode = async (req, res) => {
+  try {
+    const { coordinates, enabled } = req.body;
+    let update = {};
+    if (enabled && coordinates) {
+      update.travelLocation = { type: 'Point', coordinates };
+    } else {
+      update.travelLocation = null;
+    }
+    await User.findByIdAndUpdate(req.user.id, { $set: update });
+    res.status(200).json({ message: 'Travel mode updated' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const saveSpotifyData = async (req, res) => {
+  try {
+    const { tracks } = req.body;
+    await User.findByIdAndUpdate(req.user.id, { spotifyTopTracks: tracks });
+    res.status(200).json({ message: 'Spotify data saved' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -160,4 +201,9 @@ module.exports = {
   getWhoLikedMe,
   logProfileVisit,
   findBlindDate,
+  getTopPicks,
+  rewindLastSwipe,
+  activateBoost,
+  setTravelMode,
+  saveSpotifyData
 };
