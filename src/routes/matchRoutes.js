@@ -1,4 +1,4 @@
-cat << 'EOF' > src/routes/matchRoutes.js
+
 const express = require('express');
 const router = express.Router();
 const {
@@ -30,4 +30,3 @@ router.post('/travel', protect, setTravelMode);
 router.post('/spotify', protect, saveSpotifyData);
 
 module.exports = router;
-EOF

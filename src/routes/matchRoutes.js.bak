@@ -1,3 +1,4 @@
+cat << 'EOF' > src/routes/matchRoutes.js
 const express = require('express');
 const router = express.Router();
 const {
@@ -25,7 +26,8 @@ router.post('/visit/:id', protect, logProfileVisit);
 router.post('/blind-date/find', protect, findBlindDate);
 router.post('/rewind', protect, rewindLastSwipe);
 router.post('/boost', protect, activateBoost);
-router.post('/travel', aprotect, setTravelMode);
+router.post('/travel', protect, setTravelMode);
 router.post('/spotify', protect, saveSpotifyData);
 
 module.exports = router;
+EOF
