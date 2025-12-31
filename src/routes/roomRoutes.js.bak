@@ -8,6 +8,7 @@ const {
 const { protect } = require('../middleware/authMiddleware');
 
 router.post('/', protect, createRoom);
+router.put('/image', protect, updateRoomImage); 
 router.get('/', protect, getAllRooms);
 router.get('/:id', protect, getRoomById);
 router.post('/:id/join', protect, joinRoom);
