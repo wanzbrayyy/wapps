@@ -1,11 +1,6 @@
 
 const mongoose = require('mongoose');
 
-const dailyMissionSchema = new mongoose.Schema({
-  lastLogin: { type: Date },
-  lastShare: { type: Date }
-}, { _id: false });
-
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   fullName: { type: String, required: true },
@@ -18,22 +13,40 @@ const userSchema = new mongoose.Schema({
   following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   coins: { type: Number, default: 1000 },
   
-  dailyMissions: { type: dailyMissionSchema, default: {} },
-
   birthDate: { type: Date },
   gender: { type: String, enum: ['Man', 'Woman', 'Other'] },
   interestedIn: { type: String, enum: ['Men', 'Women', 'Everyone'], default: 'Everyone' },
-  location: { type: { type: String, enum: ['Point'], default: 'Point' }, coordinates: { type: [Number], default: [0, 0] } },
-  travelLocation: { type: { type: String, enum: ['Point'] }, coordinates: { type: [Number] } },
+
+  location: {
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], default: [0, 0] }
+  },
+  
+  travelLocation: {
+    type: { type: String, enum: ['Point'] },
+    coordinates: { type: [Number] }
+  },
+
   height: { type: Number },
   education: { type: String, default: '' },
   religion: { type: String, default: '' },
   smoking: { type: String, enum: ['Yes', 'No', 'Sometimes'], default: 'No' },
   relationshipIntent: { type: String, enum: ['Serious', 'Casual', 'Friends'], default: 'Serious' },
-  swiped: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, action: { type: String, enum: ['like', 'dislike', 'superlike'] } }],
+
+  swiped: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    action: { type: String, enum: ['like', 'dislike', 'superlike'] }
+  }],
   matches: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+
   boostExpiresAt: { type: Date },
-  spotifyTopTracks: [{ trackName: String, artist: String, albumArtUrl: String }],
+
+  spotifyTopTracks: [{
+    trackName: String,
+    artist: String,
+    albumArtUrl: String
+  }],
+
   resetPasswordToken: String,
   resetPasswordExpire: Date,
 }, { timestamps: true });

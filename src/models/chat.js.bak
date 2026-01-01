@@ -1,25 +1,17 @@
-
 const mongoose = require('mongoose');
-
-const fileInfoSchema = new mongoose.Schema({
-  url: String,
-  name: String,
-  size: Number,
-  mimeType: String
-}, { _id: false });
 
 const chatSchema = new mongoose.Schema({
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   receiver: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  message: { type: String, trim: true },
-  type: { type: String, enum: ['text', 'image', 'file'], default: 'text' },
-  fileInfo: { type: fileInfoSchema },
+  message: { type: String, required: true, trim: true },
   isRead: { type: Boolean, default: false },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', default: null },
-  reactions: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, type: { type: String, enum: ['like', 'love', 'laugh', 'sad', 'angry'] } }],
+  reactions: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    type: { type: String, enum: ['like', 'love', 'laugh', 'sad', 'angry'] }
+  }],
   expireAt: { type: Date, default: undefined }
 }, { timestamps: true });
-
 chatSchema.index({ "expireAt": 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model('Chat', chatSchema);
