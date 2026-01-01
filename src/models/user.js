@@ -1,9 +1,15 @@
-
 const mongoose = require('mongoose');
-
-const dailyMissionSchema = new mongoose.Schema({
-  lastLogin: { type: Date },
-  lastShare: { type: Date }
+const missionProgressSchema = new mongoose.Schema({
+  lastLoginClaim: { type: Date },
+  messagesSent: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
+  swipesMade: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
+  superLikeSent: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
+  roomsJoined: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
+  roomMessageSent: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
+  giftSent: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
+  profileUpdated: { lastClaim: { type: Date } },
+  likeReceived: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
+  appShared: { lastClaim: { type: Date } },
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
@@ -11,29 +17,28 @@ const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  bio: { type: String, default: '', maxlength: 250 },
+  bio: { type: String, default: '' },
   profilePic: { type: String, default: 'https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg' },
   cloudinaryId: { type: String, default: '' },
   followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   coins: { type: Number, default: 1000 },
   
-  dailyMissions: { type: dailyMissionSchema, default: {} },
+  missionProgress: { type: missionProgressSchema, default: {} },
 
   birthDate: { type: Date },
   gender: { type: String, enum: ['Man', 'Woman', 'Other'] },
-  interestedIn: { type: String, enum: ['Men', 'Women', 'Everyone'], default: 'Everyone' },
+  interestedIn: { type: String, enum: ['Men', 'Women', 'Everyone'] },
   location: { type: { type: String, enum: ['Point'], default: 'Point' }, coordinates: { type: [Number], default: [0, 0] } },
   travelLocation: { type: { type: String, enum: ['Point'] }, coordinates: { type: [Number] } },
   height: { type: Number },
-  education: { type: String, default: '' },
-  religion: { type: String, default: '' },
-  smoking: { type: String, enum: ['Yes', 'No', 'Sometimes'], default: 'No' },
-  relationshipIntent: { type: String, enum: ['Serious', 'Casual', 'Friends'], default: 'Serious' },
+  education: { type: String },
+  religion: { type: String },
+  smoking: { type: String, enum: ['Yes', 'No', 'Sometimes'] },
+  relationshipIntent: { type: String, enum: ['Serious', 'Casual', 'Friends'] },
   swiped: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, action: { type: String, enum: ['like', 'dislike', 'superlike'] } }],
   matches: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   boostExpiresAt: { type: Date },
-  spotifyTopTracks: [{ trackName: String, artist: String, albumArtUrl: String }],
   resetPasswordToken: String,
   resetPasswordExpire: Date,
 }, { timestamps: true });

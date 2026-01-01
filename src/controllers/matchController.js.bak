@@ -1,12 +1,6 @@
 const User = require('../models/user');
 const Like = require('../models/like');
 
-const isToday = (someDate) => {
-  if (!someDate) return false;
-  const today = new Date();
-  return new Date(someDate).toDateString() === today.toDateString();
-};
-
 const calculateAge = (birthDate) => {
   if (!birthDate) return null;
   const ageDifMs = Date.now() - new Date(birthDate).getTime();
@@ -62,31 +56,11 @@ const getDiscoveryQueue = async (req, res) => {
 const swipeAction = async (req, res) => {
   try {
     const { targetUserId, action } = req.body;
-    const currentUser = await User.findById(req.user.id);
     
-    // Mission Tracking: Swipe 20 Times & Super Like
-    if (currentUser.missionProgress) {
-      if (!isToday(currentUser.missionProgress.swipesMade.lastClaim)) {
-        currentUser.missionProgress.swipesMade.count = (currentUser.missionProgress.swipesMade.count || 0) + 1;
-      }
-      if (action === 'superlike' && !isToday(currentUser.missionProgress.superLikeSent.lastClaim)) {
-        currentUser.missionProgress.superLikeSent.count = (currentUser.missionProgress.superLikeSent.count || 0) + 1;
-      }
-    }
-
-    currentUser.swiped.push({ user: targetUserId, action });
-    await currentUser.save();
+    await User.findByIdAndUpdate(req.user.id, { $push: { swiped: { user: targetUserId, action } } });
 
     if (action === 'like' || action === 'superlike') {
       await Like.create({ liker: req.user.id, liked: targetUserId, type: action });
-
-      // Mission Tracking: Get First Like
-      const likedUser = await User.findById(targetUserId);
-      if (likedUser.missionProgress && !isToday(likedUser.missionProgress.likeReceived.lastClaim)) {
-        likedUser.missionProgress.likeReceived.count = (likedUser.missionProgress.likeReceived.count || 0) + 1;
-        await likedUser.save();
-      }
-
       const mutualLike = await Like.findOne({ liker: targetUserId, liked: req.user.id });
 
       if (mutualLike) {

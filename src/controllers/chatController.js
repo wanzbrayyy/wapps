@@ -1,4 +1,3 @@
-
 const Chat = require('../models/chat');
 const ChatPreference = require('../models/chatPreference');
 const User = require('../models/user');
@@ -6,6 +5,12 @@ const axios = require('axios');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 const cloudinary = require('../config/cloudinary');
+
+const isToday = (someDate) => {
+  if (!someDate) return false;
+  const today = new Date();
+  return new Date(someDate).toDateString() === today.toDateString();
+};
 
 const streamUpload = (buffer, folder) => {
   return new Promise((resolve, reject) => {
@@ -46,6 +51,13 @@ const sendMessage = async (req, res) => {
     }
     
     const newChat = await Chat.create(chatData);
+
+    const senderUser = await User.findById(senderId);
+    if (senderUser.missionProgress && !isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
+        senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
+        await senderUser.save();
+    }
+
     const fullChat = await Chat.findById(newChat._id).populate('sender', 'username profilePic').populate('replyTo', 'message sender');
     res.status(201).json(fullChat);
   } catch (error) {

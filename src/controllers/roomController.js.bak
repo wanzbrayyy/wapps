@@ -2,12 +2,6 @@ const Room = require('../models/room');
 const RoomMessage = require('../models/roomMessage');
 const User = require('../models/user');
 
-const isToday = (someDate) => {
-  if (!someDate) return false;
-  const today = new Date();
-  return new Date(someDate).toDateString() === today.toDateString();
-};
-
 const createRoom = async (req, res) => {
   try {
     const { title, category, description, roomImage } = req.body;
@@ -49,17 +43,7 @@ const joinRoom = async (req, res) => {
     const room = await Room.findById(req.params.id);
     if (!room) return res.status(404).json({ message: 'Room not found' });
     if (room.bannedUsers.includes(req.user.id)) return res.status(403).json({ message: 'You are banned from this room' });
-
-    if (!room.participants.includes(req.user.id)) {
-      room.participants.push(req.user.id);
-      await room.save();
-      
-      const user = await User.findById(req.user.id);
-      if (user.missionProgress && !isToday(user.missionProgress.roomsJoined.lastClaim)) {
-        user.missionProgress.roomsJoined.count = (user.missionProgress.roomsJoined.count || 0) + 1;
-        await user.save();
-      }
-    }
+    if (!room.participants.includes(req.user.id)) { room.participants.push(req.user.id); await room.save(); }
     res.json(room);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
@@ -120,20 +104,15 @@ const sendGift = async (req, res) => {
     if (!room) return res.status(404).json({ message: 'Room not found' });
     const host = await User.findById(room.creator);
     if (sender.coins < amount) return res.status(400).json({ message: 'Insufficient coins' });
-    
     sender.coins -= amount;
     host.coins += amount;
-    
-    if (sender.missionProgress && !isToday(sender.missionProgress.giftSent.lastClaim)) {
-        sender.missionProgress.giftSent.count = (sender.missionProgress.giftSent.count || 0) + 1;
-    }
-
     await sender.save();
     await host.save();
     await RoomMessage.create({ room: req.params.id, sender: req.user.id, message: `Sent a gift of ${amount} coins! 🎁`, type: 'system' });
     res.json({ message: 'Gift sent', newBalance: sender.coins });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
+
 const createEvent = async (req, res) => {
   try {
     const { title, date, description } = req.body;
@@ -150,17 +129,11 @@ const sendRoomMessage = async (req, res) => {
   try {
     const { message, type } = req.body;
     const newMsg = await RoomMessage.create({ room: req.params.id, sender: req.user.id, message, type: type || 'text' });
-    
-    const user = await User.findById(req.user.id);
-    if (user.missionProgress && !isToday(user.missionProgress.roomMessageSent.lastClaim)) {
-        user.missionProgress.roomMessageSent.count = (user.missionProgress.roomMessageSent.count || 0) + 1;
-        await user.save();
-    }
-    
     const fullMsg = await RoomMessage.findById(newMsg._id).populate('sender', 'username profilePic fullName');
     res.status(201).json(fullMsg);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
+
 const getRoomMessages = async (req, res) => {
   try {
     const messages = await RoomMessage.find({ room: req.params.id }).populate('sender', 'username profilePic fullName').sort({ createdAt: 1 });
