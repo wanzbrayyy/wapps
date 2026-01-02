@@ -6,12 +6,14 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 const cloudinary = require('../config/cloudinary');
 
+// Helper: Cek apakah tanggal hari ini
 const isToday = (someDate) => {
   if (!someDate) return false;
   const today = new Date();
   return new Date(someDate).toDateString() === today.toDateString();
 };
 
+// Helper: Upload Stream ke Cloudinary
 const streamUpload = (buffer, folder) => {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream({ folder: folder }, (error, result) => {
@@ -23,45 +25,91 @@ const streamUpload = (buffer, folder) => {
 
 const sendMessage = async (req, res) => {
   try {
-    const { receiverId, message, replyTo, isDisappearing, type } = req.body;
+    const { receiverId, message, type } = req.body;
+    
+    // Normalisasi input string dari FormData (jika dikirim sebagai string "null"/"undefined")
+    let replyTo = req.body.replyTo;
+    if (replyTo === 'null' || replyTo === 'undefined') replyTo = null;
+
+    let isDisappearing = req.body.isDisappearing;
+    if (typeof isDisappearing === 'string') isDisappearing = isDisappearing === 'true';
+
     const senderId = req.user.id;
     let chatData = { sender: senderId, receiver: receiverId, replyTo, type: type || 'text' };
 
+    // --- LOGIKA UPLOAD FILE ---
     if (req.file) {
+      // 1. Jika Image -> Upload ke CLOUDINARY
       if (type === 'image') {
         const result = await streamUpload(req.file.buffer, 'wapps_chat_images');
-        chatData.fileInfo = { url: result.secure_url, name: req.file.originalname, size: req.file.size, mimeType: req.file.mimetype };
+        chatData.fileInfo = { 
+          url: result.secure_url, 
+          name: req.file.originalname, 
+          size: req.file.size, 
+          mimeType: req.file.mimetype 
+        };
         chatData.message = message || 'Image';
+      
+      // 2. Jika File (Zip, Pdf, dll) -> Upload ke CATBOX.MOE
       } else if (type === 'file') {
         const form = new FormData();
         form.append('reqtype', 'fileupload');
-        form.append('userhash', process.env.CATBOX_USER_HASH);
+        
+        // Gunakan User Hash jika ada di env (Optional untuk Catbox)
+        if (process.env.CATBOX_USER_HASH) {
+          form.append('userhash', process.env.CATBOX_USER_HASH);
+        }
+        
+        // Penting: Sertakan filename saat append buffer
         form.append('fileToUpload', req.file.buffer, req.file.originalname);
-        const { data: fileUrl } = await axios.post('https://catbox.moe/user/api.php', form, { headers: form.getHeaders() });
-        chatData.fileInfo = { url: fileUrl, name: req.file.originalname, size: req.file.size, mimeType: req.file.mimetype };
+
+        // Kirim ke API Catbox
+        const response = await axios.post('https://catbox.moe/user/api.php', form, { 
+          headers: form.getHeaders() 
+        });
+
+        // Catbox mengembalikan raw text URL (misal: https://files.catbox.moe/xyz.zip)
+        const fileUrl = response.data;
+
+        chatData.fileInfo = { 
+          url: fileUrl.trim(), // Bersihkan spasi/newline
+          name: req.file.originalname, 
+          size: req.file.size, 
+          mimeType: req.file.mimetype 
+        };
         chatData.message = message || req.file.originalname;
       }
     } else {
+      // Jika Text biasa
       if (!message) return res.status(400).json({ message: 'Message is required for text type' });
       chatData.message = message;
     }
 
+    // Handle Disappearing Messages
     if (isDisappearing) {
       chatData.expireAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     }
     
+    // Simpan Chat ke Database
     const newChat = await Chat.create(chatData);
 
+    // Update Misi Harian (Messages Sent)
     const senderUser = await User.findById(senderId);
     if (senderUser.missionProgress && !isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
         senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
         await senderUser.save();
     }
 
-    const fullChat = await Chat.findById(newChat._id).populate('sender', 'username profilePic').populate('replyTo', 'message sender');
+    // Populate Data untuk return ke Frontend
+    const fullChat = await Chat.findById(newChat._id)
+      .populate('sender', 'username profilePic')
+      .populate('replyTo', 'message sender');
+      
     res.status(201).json(fullChat);
+
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("Send Message Error:", error);
+    res.status(500).json({ message: error.message || 'Internal Server Error' });
   }
 };
 
@@ -92,7 +140,13 @@ const getMessages = async (req, res) => {
       query.message = { $regex: search, $options: 'i' };
     }
 
-    const messages = await Chat.find(query).sort({ createdAt: 1 }).populate('sender', 'username profilePic').populate('replyTo', 'message sender').populate('reactions.user', 'username');
+    const messages = await Chat.find(query)
+      .sort({ createdAt: 1 })
+      .populate('sender', 'username profilePic')
+      .populate('replyTo', 'message sender')
+      .populate('reactions.user', 'username');
+      
+    // Tandai pesan sebagai terbaca
     await Chat.updateMany({ sender: userId, receiver: myId, isRead: false }, { $set: { isRead: true } });
     res.json(messages);
   } catch (error) {
@@ -106,13 +160,15 @@ const setChatPreference = async (req, res) => {
     let wallpaperUrl;
 
     if (req.file) {
+      // Wallpaper tetap menggunakan Cloudinary
       const result = await streamUpload(req.file.buffer, 'wapps_wallpapers');
       wallpaperUrl = result.secure_url;
     }
     
     const updateData = {};
     if (wallpaperUrl) updateData.wallpaper = wallpaperUrl;
-    if (isPinned !== undefined) updateData.isPinned = isPinned;
+    // Handle string boolean dari FormData
+    if (isPinned !== undefined) updateData.isPinned = (isPinned === 'true' || isPinned === true);
 
     const pref = await ChatPreference.findOneAndUpdate(
       { user: req.user.id, targetUser: targetUserId },
