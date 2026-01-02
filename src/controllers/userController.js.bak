@@ -1,6 +1,10 @@
 const User = require('../models/user');
 const cloudinary = require('cloudinary').v2; 
-
+const isToday = (someDate) => {
+  if (!someDate) return false;
+  const today = new Date();
+  return new Date(someDate).toDateString() === today.toDateString();
+};
 const getAllUsers = async (req, res) => {
   try {
     const keyword = req.query.search
