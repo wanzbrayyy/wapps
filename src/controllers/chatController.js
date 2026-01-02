@@ -6,37 +6,16 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 const cloudinary = require('../config/cloudinary');
 
-// Helper: Cek tanggal hari ini
-const isToday = (someDate) => {
-  if (!someDate) return false;
-  const today = new Date();
-  return new Date(someDate).toDateString() === today.toDateString();
-};
-
-// Helper: Upload ke Cloudinary (Fix: resource_type: "auto")
 const streamUpload = (buffer, folder) => {
   return new Promise((resolve, reject) => {
-    if (!buffer) {
-      return reject(new Error("Upload failed: Buffer is empty"));
-    }
-    
-    // Tambahkan resource_type: "auto" agar tidak error "unknown file format"
     const stream = cloudinary.uploader.upload_stream(
       { folder: folder, resource_type: "auto" }, 
       (error, result) => {
-        if (result) {
-          resolve(result);
-        } else {
-          // Pastikan error selalu berbentuk Error object agar bisa di-catch
-          reject(new Error(error.message || "Cloudinary Upload Error"));
-        }
+        if (result) resolve(result);
+        else reject(error);
       }
     );
-
-    // Handle stream errors
-    Readable.from(buffer)
-      .pipe(stream)
-      .on('error', (err) => reject(err));
+    Readable.from(buffer).pipe(stream).on('error', reject);
   });
 };
 
@@ -44,8 +23,7 @@ const sendMessage = async (req, res) => {
   try {
     const { receiverId, message, type } = req.body;
     const senderId = req.user.id;
-
-    // Normalisasi input
+    
     let replyTo = req.body.replyTo;
     if (!replyTo || replyTo === 'null' || replyTo === 'undefined') replyTo = null;
 
@@ -59,13 +37,11 @@ const sendMessage = async (req, res) => {
       type: type || 'text' 
     };
 
-    // --- LOGIKA FILE / IMAGE ---
     if (type === 'image' || type === 'file') {
       if (!req.file || !req.file.buffer) {
-        return res.status(400).json({ message: `File is required for type ${type}` });
+        return res.status(400).json({ message: 'File is required' });
       }
 
-      // 1. Upload IMAGE ke Cloudinary
       if (type === 'image') {
         try {
           const result = await streamUpload(req.file.buffer, 'wapps_chat_images');
@@ -76,26 +52,32 @@ const sendMessage = async (req, res) => {
             mimeType: req.file.mimetype 
           };
           chatData.message = message || 'Image';
-        } catch (uploadError) {
-          console.error("Cloudinary Error:", uploadError.message);
-          return res.status(400).json({ message: "Failed to upload image. Format not supported." });
+        } catch (err) {
+          return res.status(400).json({ message: 'Image upload failed', error: err.message });
         }
       
-      // 2. Upload FILE ke Catbox
       } else if (type === 'file') {
-        const form = new FormData();
-        form.append('reqtype', 'fileupload');
-        if (process.env.CATBOX_USER_HASH) {
-          form.append('userhash', process.env.CATBOX_USER_HASH);
-        }
-        form.append('fileToUpload', req.file.buffer, req.file.originalname);
-
         try {
+          const form = new FormData();
+          form.append('reqtype', 'fileupload');
+          form.append('fileToUpload', req.file.buffer, {
+            filename: req.file.originalname,
+            contentType: req.file.mimetype
+          });
+
+          if (process.env.CATBOX_USER_HASH) {
+            form.append('userhash', process.env.CATBOX_USER_HASH);
+          }
+
           const response = await axios.post('https://catbox.moe/user/api.php', form, { 
             headers: form.getHeaders(),
             maxContentLength: Infinity,
             maxBodyLength: Infinity
           });
+
+          if (!response.data || response.data.includes('<html')) {
+             throw new Error('Invalid response from Catbox');
+          }
 
           chatData.fileInfo = { 
             url: response.data.toString().trim(), 
@@ -104,15 +86,13 @@ const sendMessage = async (req, res) => {
             mimeType: req.file.mimetype 
           };
           chatData.message = message || req.file.originalname;
-        } catch (catboxError) {
-          console.error("Catbox Error:", catboxError.message);
-          return res.status(502).json({ message: "Failed to upload file to external server" });
+        } catch (err) {
+          return res.status(502).json({ message: 'Catbox upload failed', error: err.message });
         }
       }
     } else {
-      // --- LOGIKA TEXT ---
       if (!message || !message.trim()) {
-        return res.status(400).json({ message: 'Message is required' });
+        return res.status(400).json({ message: 'Message cannot be empty' });
       }
       chatData.message = message;
     }
@@ -121,23 +101,20 @@ const sendMessage = async (req, res) => {
       chatData.expireAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     }
     
-    // Simpan ke DB
     const newChat = await Chat.create(chatData);
 
-    // Update Misi Harian (Opsional)
     try {
-        const senderUser = await User.findById(senderId);
-        if (senderUser && senderUser.missionProgress) {
-            if (!isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
-                senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
-                await senderUser.save();
-            }
+      const senderUser = await User.findById(senderId);
+      const today = new Date().toDateString();
+      if (senderUser && senderUser.missionProgress) {
+        const lastClaim = senderUser.missionProgress.messagesSent.lastClaim;
+        if (!lastClaim || new Date(lastClaim).toDateString() !== today) {
+          senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
+          await senderUser.save();
         }
-    } catch (missionErr) {
-        console.error("Mission Update Error (Ignored):", missionErr.message);
-    }
+      }
+    } catch (ignore) {}
 
-    // Populate Response
     const fullChat = await Chat.findById(newChat._id)
       .populate('sender', 'username profilePic')
       .populate('replyTo', 'message sender');
@@ -145,8 +122,7 @@ const sendMessage = async (req, res) => {
     res.status(201).json(fullChat);
 
   } catch (error) {
-    console.error("SendMessage Critical Error:", error);
-    res.status(500).json({ message: "Internal Server Error", detail: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
@@ -186,7 +162,6 @@ const getMessages = async (req, res) => {
       .populate('replyTo', 'message sender')
       .populate('reactions.user', 'username');
       
-    // Mark as read
     await Chat.updateMany({ sender: userId, receiver: myId, isRead: false }, { $set: { isRead: true } });
     
     res.json(messages);
@@ -201,7 +176,6 @@ const setChatPreference = async (req, res) => {
     let wallpaperUrl;
 
     if (req.file) {
-      // Wallpaper biasanya gambar, tapi kita set auto supaya aman
       const result = await streamUpload(req.file.buffer, 'wapps_wallpapers');
       wallpaperUrl = result.secure_url;
     }
@@ -217,7 +191,6 @@ const setChatPreference = async (req, res) => {
     );
     res.json(pref);
   } catch (error) {
-    console.error("Preference Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
