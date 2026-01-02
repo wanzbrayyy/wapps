@@ -8,10 +8,29 @@ const matchRoutes = require('./routes/matchRoutes');
 const missionRoutes = require('./routes/missionRoutes');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 
+// Menangkap error "Unhandled Rejection: [object Object]" agar terbaca di Log
+process.on('unhandledRejection', (reason, promise) => {
+  console.error("🔥 Critical Unhandled Rejection:", JSON.stringify(reason, null, 2));
+  if (reason instanceof Error) console.error(reason.stack);
+});
+
 const app = express();
+
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Fix 404 Halaman Utama
+app.get('/', (req, res) => {
+  res.status(200).json({ 
+    message: "Wapps API is Running", 
+    status: "OK", 
+    timestamp: new Date().toISOString() 
+  });
+});
+
+// Fix 404 Favicon
+app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
