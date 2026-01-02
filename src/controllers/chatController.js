@@ -13,14 +13,11 @@ const isToday = (someDate) => {
   return new Date(someDate).toDateString() === today.toDateString();
 };
 
-// Helper: Upload Stream ke Cloudinary (Images & Wallpapers)
+// Helper: Upload Stream ke Cloudinary
 const streamUpload = (buffer, folder) => {
   return new Promise((resolve, reject) => {
-    // FIX: Cegah crash jika buffer undefined
-    if (!buffer) {
-      return reject(new Error("File buffer is missing or empty"));
-    }
-
+    if (!buffer) return reject(new Error("Upload failed: Buffer is empty"));
+    
     const stream = cloudinary.uploader.upload_stream({ folder: folder }, (error, result) => {
       if (result) resolve(result); else reject(error);
     });
@@ -37,7 +34,7 @@ const sendMessage = async (req, res) => {
   try {
     const { receiverId, message, type } = req.body;
     
-    // Normalisasi input string dari FormData
+    // Normalisasi input
     let replyTo = req.body.replyTo;
     if (replyTo === 'null' || replyTo === 'undefined' || replyTo === '') replyTo = null;
 
@@ -47,14 +44,14 @@ const sendMessage = async (req, res) => {
     const senderId = req.user.id;
     let chatData = { sender: senderId, receiver: receiverId, replyTo, type: type || 'text' };
 
-    // --- LOGIKA UPLOAD FILE ---
-    if (req.file) {
-      // Validasi Buffer
-      if (!req.file.buffer) {
-        return res.status(400).json({ message: 'File upload failed: Buffer is empty' });
+    // --- VALIDASI & UPLOAD FILE ---
+    if (type === 'image' || type === 'file') {
+      // Cek apakah file benar-benar ada
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({ message: `File is required for type ${type}` });
       }
 
-      // 1. Jika Image -> Upload ke CLOUDINARY
+      // 1. Upload IMAGE ke Cloudinary
       if (type === 'image') {
         const result = await streamUpload(req.file.buffer, 'wapps_chat_images');
         chatData.fileInfo = { 
@@ -65,24 +62,27 @@ const sendMessage = async (req, res) => {
         };
         chatData.message = message || 'Image';
       
-      // 2. Jika File (Zip, Pdf, dll) -> Upload ke CATBOX.MOE
+      // 2. Upload FILE ke Catbox
       } else if (type === 'file') {
-        try {
-          const form = new FormData();
-          form.append('reqtype', 'fileupload');
-          
-          if (process.env.CATBOX_USER_HASH) {
-            form.append('userhash', process.env.CATBOX_USER_HASH);
-          }
-          
-          // Penting: Masukkan filename agar Catbox mengenali ekstensi
-          form.append('fileToUpload', req.file.buffer, req.file.originalname);
+        const form = new FormData();
+        form.append('reqtype', 'fileupload');
+        
+        if (process.env.CATBOX_USER_HASH) {
+          form.append('userhash', process.env.CATBOX_USER_HASH);
+        }
+        
+        // Append file buffer dengan nama asli
+        form.append('fileToUpload', req.file.buffer, req.file.originalname);
 
+        try {
           const response = await axios.post('https://catbox.moe/user/api.php', form, { 
-            headers: form.getHeaders() 
+            headers: form.getHeaders(),
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
           });
 
-          const fileUrl = response.data; // Raw URL string
+          // Catbox return raw URL string
+          const fileUrl = response.data;
 
           chatData.fileInfo = { 
             url: fileUrl.toString().trim(), 
@@ -91,13 +91,16 @@ const sendMessage = async (req, res) => {
             mimeType: req.file.mimetype 
           };
           chatData.message = message || req.file.originalname;
-        } catch (catboxError) {
-          console.error("Catbox Upload Error:", catboxError.message);
-          return res.status(500).json({ message: "Failed to upload file to external server" });
+
+        } catch (uploadErr) {
+          console.error("Catbox Upload Failed:", uploadErr.message);
+          // Fallback log detail
+          if (uploadErr.response) console.error("Catbox Response:", uploadErr.response.data);
+          return res.status(502).json({ message: "Failed to upload file to external server" });
         }
       }
     } else {
-      // Jika Text biasa (tanpa file)
+      // --- LOGIKA TEXT ONLY ---
       if (!message) return res.status(400).json({ message: 'Message is required for text type' });
       chatData.message = message;
     }
@@ -107,17 +110,17 @@ const sendMessage = async (req, res) => {
       chatData.expireAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     }
     
-    // Simpan Chat ke Database
+    // Simpan ke DB
     const newChat = await Chat.create(chatData);
 
-    // Update Misi Harian
+    // Update Misi
     const senderUser = await User.findById(senderId);
     if (senderUser.missionProgress && !isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
         senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
         await senderUser.save();
     }
 
-    // Populate Data
+    // Populate Response
     const fullChat = await Chat.findById(newChat._id)
       .populate('sender', 'username profilePic')
       .populate('replyTo', 'message sender');
@@ -125,8 +128,13 @@ const sendMessage = async (req, res) => {
     res.status(201).json(fullChat);
 
   } catch (error) {
-    console.error("Send Message Critical Error:", error);
-    res.status(500).json({ message: error.message || 'Internal Server Error' });
+    // Enhanced Error Logging untuk "Unhandled Rejection"
+    let errorMsg = error.message;
+    if (error.response && error.response.data) {
+      errorMsg = JSON.stringify(error.response.data);
+    }
+    console.error("SendMessage Critical Error:", errorMsg);
+    res.status(500).json({ message: "Internal Server Error", detail: errorMsg });
   }
 };
 
@@ -176,8 +184,6 @@ const setChatPreference = async (req, res) => {
     let wallpaperUrl;
 
     if (req.file) {
-      if (!req.file.buffer) return res.status(400).json({ message: 'File buffer missing' });
-      
       const result = await streamUpload(req.file.buffer, 'wapps_wallpapers');
       wallpaperUrl = result.secure_url;
     }
