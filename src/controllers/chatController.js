@@ -6,19 +6,6 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 const cloudinary = require('../config/cloudinary');
 
-const streamUpload = (buffer, folder) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: folder, resource_type: "auto" }, 
-      (error, result) => {
-        if (result) resolve(result);
-        else reject(error);
-      }
-    );
-    Readable.from(buffer).pipe(stream).on('error', reject);
-  });
-};
-
 const sendMessage = async (req, res) => {
   try {
     const { receiverId, message, type } = req.body;
@@ -37,58 +24,19 @@ const sendMessage = async (req, res) => {
       type: type || 'text' 
     };
 
-    if (type === 'image' || type === 'file') {
-      if (!req.file || !req.file.buffer) {
-        return res.status(400).json({ message: 'File is required' });
-      }
-
-      if (type === 'image') {
-        try {
-          const result = await streamUpload(req.file.buffer, 'wapps_chat_images');
-          chatData.fileInfo = { 
-            url: result.secure_url, 
-            name: req.file.originalname, 
-            size: req.file.size, 
-            mimeType: req.file.mimetype 
-          };
-          chatData.message = message || 'Image';
-        } catch (err) {
-          return res.status(400).json({ message: 'Image upload failed', error: err.message });
-        }
+    if (req.file) {
+      chatData.fileInfo = { 
+        url: req.file.path, 
+        name: req.file.originalname, 
+        size: req.file.size, 
+        mimeType: req.file.mimetype 
+      };
       
-      } else if (type === 'file') {
-        try {
-          const form = new FormData();
-          form.append('reqtype', 'fileupload');
-          form.append('fileToUpload', req.file.buffer, {
-            filename: req.file.originalname,
-            contentType: req.file.mimetype
-          });
-
-          if (process.env.CATBOX_USER_HASH) {
-            form.append('userhash', process.env.CATBOX_USER_HASH);
-          }
-
-          const response = await axios.post('https://catbox.moe/user/api.php', form, { 
-            headers: form.getHeaders(),
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity
-          });
-
-          if (!response.data || response.data.includes('<html')) {
-             throw new Error('Invalid response from Catbox');
-          }
-
-          chatData.fileInfo = { 
-            url: response.data.toString().trim(), 
-            name: req.file.originalname, 
-            size: req.file.size, 
-            mimeType: req.file.mimetype 
-          };
-          chatData.message = message || req.file.originalname;
-        } catch (err) {
-          return res.status(502).json({ message: 'Catbox upload failed', error: err.message });
-        }
+      if (type === 'image') {
+        chatData.message = message || 'Image';
+      } else {
+        chatData.type = 'file'; 
+        chatData.message = message || req.file.originalname;
       }
     } else {
       if (!message || !message.trim()) {
@@ -176,8 +124,7 @@ const setChatPreference = async (req, res) => {
     let wallpaperUrl;
 
     if (req.file) {
-      const result = await streamUpload(req.file.buffer, 'wapps_wallpapers');
-      wallpaperUrl = result.secure_url;
+      wallpaperUrl = req.file.path;
     }
     
     const updateData = {};

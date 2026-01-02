@@ -10,14 +10,10 @@ cloudinary.config({
 
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
-  params: async (req, file) => {
-    return {
-      folder: 'wapps_uploads',
-      // 'auto' agar Cloudinary mendeteksi apakah itu gambar, video, atau raw file (zip/pdf)
-      resource_type: 'auto', 
-      // public_id opsional, gunakan nama asli file
-      public_id: file.originalname.split('.')[0]
-    };
+  params: {
+    folder: process.env.CLOUDINARY_UPLOAD_FOLDER || 'wapps_uploads',
+    resource_type: 'auto',
+    allowed_formats: ['jpg', 'png', 'jpeg', 'gif', 'webp'],
   },
 });
 
