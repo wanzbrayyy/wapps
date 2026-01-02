@@ -6,52 +6,48 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 const cloudinary = require('../config/cloudinary');
 
-// Helper: Cek apakah tanggal hari ini
 const isToday = (someDate) => {
   if (!someDate) return false;
   const today = new Date();
   return new Date(someDate).toDateString() === today.toDateString();
 };
 
-// Helper: Upload Stream ke Cloudinary
 const streamUpload = (buffer, folder) => {
   return new Promise((resolve, reject) => {
-    if (!buffer) return reject(new Error("Upload failed: Buffer is empty"));
-    
+    if (!buffer) return reject(new Error("Buffer is empty"));
     const stream = cloudinary.uploader.upload_stream({ folder: folder }, (error, result) => {
-      if (result) resolve(result); else reject(error);
+      if (result) resolve(result);
+      else reject(error);
     });
-    
-    try {
-      Readable.from(buffer).pipe(stream);
-    } catch (err) {
-      reject(err);
-    }
+    Readable.from(buffer).pipe(stream).on('error', reject);
   });
 };
 
 const sendMessage = async (req, res) => {
   try {
     const { receiverId, message, type } = req.body;
-    
-    // Normalisasi input
+    const senderId = req.user.id;
+
     let replyTo = req.body.replyTo;
-    if (replyTo === 'null' || replyTo === 'undefined' || replyTo === '') replyTo = null;
+    if (replyTo === 'null' || replyTo === 'undefined' || !replyTo) replyTo = null;
 
     let isDisappearing = req.body.isDisappearing;
-    if (typeof isDisappearing === 'string') isDisappearing = isDisappearing === 'true';
+    if (typeof isDisappearing === 'string') {
+      isDisappearing = isDisappearing === 'true';
+    }
 
-    const senderId = req.user.id;
-    let chatData = { sender: senderId, receiver: receiverId, replyTo, type: type || 'text' };
+    const chatData = { 
+      sender: senderId, 
+      receiver: receiverId, 
+      replyTo, 
+      type: type || 'text' 
+    };
 
-    // --- VALIDASI & UPLOAD FILE ---
     if (type === 'image' || type === 'file') {
-      // Cek apakah file benar-benar ada
       if (!req.file || !req.file.buffer) {
-        return res.status(400).json({ message: `File is required for type ${type}` });
+        return res.status(400).json({ message: `File required for type ${type}` });
       }
 
-      // 1. Upload IMAGE ke Cloudinary
       if (type === 'image') {
         const result = await streamUpload(req.file.buffer, 'wapps_chat_images');
         chatData.fileInfo = { 
@@ -62,17 +58,13 @@ const sendMessage = async (req, res) => {
         };
         chatData.message = message || 'Image';
       
-      // 2. Upload FILE ke Catbox
       } else if (type === 'file') {
         const form = new FormData();
         form.append('reqtype', 'fileupload');
-        
         if (process.env.CATBOX_USER_HASH) {
           form.append('userhash', process.env.CATBOX_USER_HASH);
         }
-        
-        // Append file buffer dengan nama asli
-        form.append('fileToUpload', req.file.buffer, req.file.originalname);
+        form.append('fileToUpload', req.file.buffer, { filename: req.file.originalname });
 
         try {
           const response = await axios.post('https://catbox.moe/user/api.php', form, { 
@@ -81,60 +73,48 @@ const sendMessage = async (req, res) => {
             maxBodyLength: Infinity
           });
 
-          // Catbox return raw URL string
-          const fileUrl = response.data;
-
           chatData.fileInfo = { 
-            url: fileUrl.toString().trim(), 
+            url: response.data.toString().trim(), 
             name: req.file.originalname, 
             size: req.file.size, 
             mimeType: req.file.mimetype 
           };
           chatData.message = message || req.file.originalname;
-
         } catch (uploadErr) {
-          console.error("Catbox Upload Failed:", uploadErr.message);
-          // Fallback log detail
-          if (uploadErr.response) console.error("Catbox Response:", uploadErr.response.data);
-          return res.status(502).json({ message: "Failed to upload file to external server" });
+          console.error("Catbox Error:", uploadErr.message);
+          return res.status(502).json({ message: "File upload failed" });
         }
       }
     } else {
-      // --- LOGIKA TEXT ONLY ---
-      if (!message) return res.status(400).json({ message: 'Message is required for text type' });
+      if (!message || message.trim() === "") {
+        return res.status(400).json({ message: 'Message cannot be empty' });
+      }
       chatData.message = message;
     }
 
-    // Handle Disappearing Messages
     if (isDisappearing) {
       chatData.expireAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     }
-    
-    // Simpan ke DB
+
     const newChat = await Chat.create(chatData);
 
-    // Update Misi
     const senderUser = await User.findById(senderId);
-    if (senderUser.missionProgress && !isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
-        senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
-        await senderUser.save();
+    if (senderUser && senderUser.missionProgress) {
+        if (!isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
+            senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
+            await senderUser.save();
+        }
     }
 
-    // Populate Response
     const fullChat = await Chat.findById(newChat._id)
       .populate('sender', 'username profilePic')
       .populate('replyTo', 'message sender');
-      
+
     res.status(201).json(fullChat);
 
   } catch (error) {
-    // Enhanced Error Logging untuk "Unhandled Rejection"
-    let errorMsg = error.message;
-    if (error.response && error.response.data) {
-      errorMsg = JSON.stringify(error.response.data);
-    }
-    console.error("SendMessage Critical Error:", errorMsg);
-    res.status(500).json({ message: "Internal Server Error", detail: errorMsg });
+    console.error("SendMessage Error:", JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 };
 
@@ -142,6 +122,7 @@ const addReaction = async (req, res) => {
   try {
     const { chatId, type } = req.body;
     const chat = await Chat.findById(chatId);
+    
     if (!chat) return res.status(404).json({ message: 'Chat not found' });
 
     chat.reactions = chat.reactions.filter(r => r.user.toString() !== req.user.id);
@@ -150,6 +131,7 @@ const addReaction = async (req, res) => {
     
     res.json(chat);
   } catch (error) {
+    console.error("AddReaction Error:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -159,7 +141,13 @@ const getMessages = async (req, res) => {
     const { userId } = req.params;
     const myId = req.user.id;
     const { search } = req.query;
-    let query = { $or: [{ sender: myId, receiver: userId }, { sender: userId, receiver: myId }] };
+    
+    let query = { 
+      $or: [
+        { sender: myId, receiver: userId }, 
+        { sender: userId, receiver: myId }
+      ] 
+    };
 
     if (search) {
       query.message = { $regex: search, $options: 'i' };
@@ -171,9 +159,14 @@ const getMessages = async (req, res) => {
       .populate('replyTo', 'message sender')
       .populate('reactions.user', 'username');
       
-    await Chat.updateMany({ sender: userId, receiver: myId, isRead: false }, { $set: { isRead: true } });
+    await Chat.updateMany(
+      { sender: userId, receiver: myId, isRead: false }, 
+      { $set: { isRead: true } }
+    );
+    
     res.json(messages);
   } catch (error) {
+    console.error("GetMessages Error:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -190,16 +183,19 @@ const setChatPreference = async (req, res) => {
     
     const updateData = {};
     if (wallpaperUrl) updateData.wallpaper = wallpaperUrl;
-    if (isPinned !== undefined) updateData.isPinned = (isPinned === 'true' || isPinned === true);
+    if (isPinned !== undefined && isPinned !== 'undefined') {
+      updateData.isPinned = (isPinned === 'true' || isPinned === true);
+    }
 
     const pref = await ChatPreference.findOneAndUpdate(
       { user: req.user.id, targetUser: targetUserId },
       { $set: updateData },
       { new: true, upsert: true }
     );
+    
     res.json(pref);
   } catch (error) {
-    console.error("Preference Error:", error);
+    console.error("SetPreference Error:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -207,15 +203,25 @@ const setChatPreference = async (req, res) => {
 const getConversations = async (req, res) => {
   try {
     const currentUserId = req.user.id;
+    
     const prefs = await ChatPreference.find({ user: currentUserId, isPinned: true });
     const pinnedIds = prefs.map(p => p.targetUser.toString());
-    const chats = await Chat.find({ $or: [{ sender: currentUserId }, { receiver: currentUserId }] }).sort({ createdAt: -1 });
+    
+    const chats = await Chat.find({ 
+      $or: [{ sender: currentUserId }, { receiver: currentUserId }] 
+    }).sort({ createdAt: -1 });
 
     const conversationMap = new Map();
     chats.forEach(chat => {
-      const otherId = chat.sender.toString() === currentUserId ? chat.receiver.toString() : chat.sender.toString();
+      const otherId = chat.sender.toString() === currentUserId 
+        ? chat.receiver.toString() 
+        : chat.sender.toString();
+        
       if (!conversationMap.has(otherId)) {
-        conversationMap.set(otherId, { lastMessage: chat, isPinned: pinnedIds.includes(otherId) });
+        conversationMap.set(otherId, { 
+          lastMessage: chat, 
+          isPinned: pinnedIds.includes(otherId) 
+        });
       }
     });
 
@@ -228,7 +234,9 @@ const getConversations = async (req, res) => {
           username: user.username,
           fullName: user.fullName,
           profilePic: user.profilePic,
-          lastMessage: data.lastMessage.type === 'text' ? data.lastMessage.message : `Sent a ${data.lastMessage.type}`,
+          lastMessage: data.lastMessage.type === 'text' 
+            ? data.lastMessage.message 
+            : `Sent a ${data.lastMessage.type}`,
           timestamp: data.lastMessage.createdAt,
           isPinned: data.isPinned
         });
@@ -236,12 +244,15 @@ const getConversations = async (req, res) => {
     }
 
     results.sort((a, b) => {
-      if (a.isPinned === b.isPinned) return new Date(b.timestamp) - new Date(a.timestamp);
+      if (a.isPinned === b.isPinned) {
+        return new Date(b.timestamp) - new Date(a.timestamp);
+      }
       return a.isPinned ? -1 : 1;
     });
 
     res.json(results);
   } catch (error) {
+    console.error("GetConversations Error:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
