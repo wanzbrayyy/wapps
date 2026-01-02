@@ -13,13 +13,23 @@ const isToday = (someDate) => {
   return new Date(someDate).toDateString() === today.toDateString();
 };
 
-// Helper: Upload Stream ke Cloudinary
+// Helper: Upload Stream ke Cloudinary (Images & Wallpapers)
 const streamUpload = (buffer, folder) => {
   return new Promise((resolve, reject) => {
+    // FIX: Cegah crash jika buffer undefined
+    if (!buffer) {
+      return reject(new Error("File buffer is missing or empty"));
+    }
+
     const stream = cloudinary.uploader.upload_stream({ folder: folder }, (error, result) => {
       if (result) resolve(result); else reject(error);
     });
-    Readable.from(buffer).pipe(stream);
+    
+    try {
+      Readable.from(buffer).pipe(stream);
+    } catch (err) {
+      reject(err);
+    }
   });
 };
 
@@ -27,9 +37,9 @@ const sendMessage = async (req, res) => {
   try {
     const { receiverId, message, type } = req.body;
     
-    // Normalisasi input string dari FormData (jika dikirim sebagai string "null"/"undefined")
+    // Normalisasi input string dari FormData
     let replyTo = req.body.replyTo;
-    if (replyTo === 'null' || replyTo === 'undefined') replyTo = null;
+    if (replyTo === 'null' || replyTo === 'undefined' || replyTo === '') replyTo = null;
 
     let isDisappearing = req.body.isDisappearing;
     if (typeof isDisappearing === 'string') isDisappearing = isDisappearing === 'true';
@@ -39,6 +49,11 @@ const sendMessage = async (req, res) => {
 
     // --- LOGIKA UPLOAD FILE ---
     if (req.file) {
+      // Validasi Buffer
+      if (!req.file.buffer) {
+        return res.status(400).json({ message: 'File upload failed: Buffer is empty' });
+      }
+
       // 1. Jika Image -> Upload ke CLOUDINARY
       if (type === 'image') {
         const result = await streamUpload(req.file.buffer, 'wapps_chat_images');
@@ -52,35 +67,37 @@ const sendMessage = async (req, res) => {
       
       // 2. Jika File (Zip, Pdf, dll) -> Upload ke CATBOX.MOE
       } else if (type === 'file') {
-        const form = new FormData();
-        form.append('reqtype', 'fileupload');
-        
-        // Gunakan User Hash jika ada di env (Optional untuk Catbox)
-        if (process.env.CATBOX_USER_HASH) {
-          form.append('userhash', process.env.CATBOX_USER_HASH);
+        try {
+          const form = new FormData();
+          form.append('reqtype', 'fileupload');
+          
+          if (process.env.CATBOX_USER_HASH) {
+            form.append('userhash', process.env.CATBOX_USER_HASH);
+          }
+          
+          // Penting: Masukkan filename agar Catbox mengenali ekstensi
+          form.append('fileToUpload', req.file.buffer, req.file.originalname);
+
+          const response = await axios.post('https://catbox.moe/user/api.php', form, { 
+            headers: form.getHeaders() 
+          });
+
+          const fileUrl = response.data; // Raw URL string
+
+          chatData.fileInfo = { 
+            url: fileUrl.toString().trim(), 
+            name: req.file.originalname, 
+            size: req.file.size, 
+            mimeType: req.file.mimetype 
+          };
+          chatData.message = message || req.file.originalname;
+        } catch (catboxError) {
+          console.error("Catbox Upload Error:", catboxError.message);
+          return res.status(500).json({ message: "Failed to upload file to external server" });
         }
-        
-        // Penting: Sertakan filename saat append buffer
-        form.append('fileToUpload', req.file.buffer, req.file.originalname);
-
-        // Kirim ke API Catbox
-        const response = await axios.post('https://catbox.moe/user/api.php', form, { 
-          headers: form.getHeaders() 
-        });
-
-        // Catbox mengembalikan raw text URL (misal: https://files.catbox.moe/xyz.zip)
-        const fileUrl = response.data;
-
-        chatData.fileInfo = { 
-          url: fileUrl.trim(), // Bersihkan spasi/newline
-          name: req.file.originalname, 
-          size: req.file.size, 
-          mimeType: req.file.mimetype 
-        };
-        chatData.message = message || req.file.originalname;
       }
     } else {
-      // Jika Text biasa
+      // Jika Text biasa (tanpa file)
       if (!message) return res.status(400).json({ message: 'Message is required for text type' });
       chatData.message = message;
     }
@@ -93,14 +110,14 @@ const sendMessage = async (req, res) => {
     // Simpan Chat ke Database
     const newChat = await Chat.create(chatData);
 
-    // Update Misi Harian (Messages Sent)
+    // Update Misi Harian
     const senderUser = await User.findById(senderId);
     if (senderUser.missionProgress && !isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
         senderUser.missionProgress.messagesSent.count = (senderUser.missionProgress.messagesSent.count || 0) + 1;
         await senderUser.save();
     }
 
-    // Populate Data untuk return ke Frontend
+    // Populate Data
     const fullChat = await Chat.findById(newChat._id)
       .populate('sender', 'username profilePic')
       .populate('replyTo', 'message sender');
@@ -108,7 +125,7 @@ const sendMessage = async (req, res) => {
     res.status(201).json(fullChat);
 
   } catch (error) {
-    console.error("Send Message Error:", error);
+    console.error("Send Message Critical Error:", error);
     res.status(500).json({ message: error.message || 'Internal Server Error' });
   }
 };
@@ -146,7 +163,6 @@ const getMessages = async (req, res) => {
       .populate('replyTo', 'message sender')
       .populate('reactions.user', 'username');
       
-    // Tandai pesan sebagai terbaca
     await Chat.updateMany({ sender: userId, receiver: myId, isRead: false }, { $set: { isRead: true } });
     res.json(messages);
   } catch (error) {
@@ -160,14 +176,14 @@ const setChatPreference = async (req, res) => {
     let wallpaperUrl;
 
     if (req.file) {
-      // Wallpaper tetap menggunakan Cloudinary
+      if (!req.file.buffer) return res.status(400).json({ message: 'File buffer missing' });
+      
       const result = await streamUpload(req.file.buffer, 'wapps_wallpapers');
       wallpaperUrl = result.secure_url;
     }
     
     const updateData = {};
     if (wallpaperUrl) updateData.wallpaper = wallpaperUrl;
-    // Handle string boolean dari FormData
     if (isPinned !== undefined) updateData.isPinned = (isPinned === 'true' || isPinned === true);
 
     const pref = await ChatPreference.findOneAndUpdate(
@@ -177,6 +193,7 @@ const setChatPreference = async (req, res) => {
     );
     res.json(pref);
   } catch (error) {
+    console.error("Preference Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
