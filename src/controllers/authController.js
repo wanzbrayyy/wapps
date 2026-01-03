@@ -81,10 +81,16 @@ const googleLogin = async (req, res) => {
     const { idToken } = req.body;
     if (!idToken) return res.status(400).json({ message: "ID Token is required" });
 
-    const ticket = await client.verifyIdToken({
-      idToken,
-      audience: [ANDROID_CLIENT_ID, process.env.GOOGLE_CLIENT_ID_WEB],
-    });
+    let ticket;
+    try {
+      ticket = await client.verifyIdToken({
+        idToken,
+        audience: [ANDROID_CLIENT_ID, process.env.GOOGLE_CLIENT_ID_WEB],
+      });
+    } catch (verificationError) {
+      console.error("Google Token Verification Failed:", verificationError);
+      return res.status(401).json({ message: "Invalid Google Token. Please try again." });
+    }
 
     const { email, name, picture } = ticket.getPayload();
 
@@ -131,8 +137,8 @@ const googleLogin = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Google Login Error:", error);
-    res.status(500).json({ message: "Google Login Failed: " + (error.message || "Token verification failed") });
+    console.error("Google Login Controller Error:", error);
+    res.status(500).json({ message: "Google Login Failed: " + (error.message || "An unexpected error occurred") });
   }
 };
 

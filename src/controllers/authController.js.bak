@@ -5,8 +5,8 @@ const crypto = require('crypto');
 const sendEmail = require('../utils/email');
 const { OAuth2Client } = require('google-auth-library');
 
-// Client ID sesuai dengan yang ada di Flutter
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID || '806236381654-kb856qoncitnmup2jav2vfe9gedqi8sp.apps.googleusercontent.com');
+const client = new OAuth2Client();
+const ANDROID_CLIENT_ID = "806236381654-kb856qoncitnmup2jav2vfe9gedqi8sp.apps.googleusercontent.com";
 
 const isToday = (someDate) => {
   if (!someDate) return false;
@@ -79,10 +79,11 @@ const login = async (req, res) => {
 const googleLogin = async (req, res) => {
   try {
     const { idToken } = req.body;
+    if (!idToken) return res.status(400).json({ message: "ID Token is required" });
 
     const ticket = await client.verifyIdToken({
       idToken,
-      audience: process.env.GOOGLE_CLIENT_ID || '806236381654-kb856qoncitnmup2jav2vfe9gedqi8sp.apps.googleusercontent.com',
+      audience: [ANDROID_CLIENT_ID, process.env.GOOGLE_CLIENT_ID_WEB],
     });
 
     const { email, name, picture } = ticket.getPayload();
@@ -90,14 +91,20 @@ const googleLogin = async (req, res) => {
     let user = await User.findOne({ email });
 
     if (!user) {
-      const generatedPassword = Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-8);
+      const generatedPassword = crypto.randomBytes(16).toString('hex');
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(generatedPassword, salt);
       
-      const generatedUsername = email.split('@')[0] + Math.floor(Math.random() * 1000);
+      const baseUsername = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, '');
+      let finalUsername = baseUsername;
+      let counter = 1;
+      while (await User.findOne({ username: finalUsername })) {
+        finalUsername = `${baseUsername}${counter}`;
+        counter++;
+      }
 
       user = await User.create({
-        username: generatedUsername,
+        username: finalUsername,
         fullName: name,
         email,
         password: hashedPassword,
@@ -117,13 +124,15 @@ const googleLogin = async (req, res) => {
       _id: user._id,
       username: user.username,
       email: user.email,
+      fullName: user.fullName,
       profilePic: user.profilePic,
       token,
       coins: user.coins
     });
 
   } catch (error) {
-    res.status(500).json({ message: "Google Login Failed: " + error.message });
+    console.error("Google Login Error:", error);
+    res.status(500).json({ message: "Google Login Failed: " + (error.message || "Token verification failed") });
   }
 };
 
