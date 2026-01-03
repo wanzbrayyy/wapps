@@ -3,7 +3,6 @@ const router = express.Router();
 const { 
   register, 
   login, 
-  googleLogin,
   checkUsername, 
   checkEmail, 
   forgotPassword, 
@@ -14,7 +13,6 @@ const { protect } = require('../middleware/authMiddleware');
 
 router.post('/register', register);
 router.post('/login', login);
-router.post('/google', googleLogin);
 router.post('/check-username', checkUsername);
 router.post('/check-email', checkEmail);
 router.post('/forgot-password', forgotPassword);
