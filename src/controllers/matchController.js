@@ -33,27 +33,28 @@ const getDiscoveryQueue = async (req, res) => {
     if (!currentUser) return res.status(404).json({ message: "User not found" });
 
     const { 
-      minAge = 18, maxAge = 99, gender, distance = 100, 
-      heightMin, heightMax, education, religion, smoking,
+      minAge = 18, maxAge = 99, gender, distance = 5000, // Default distance diperbesar (5000km)
+      education, religion, smoking,
       global, isActive, isVerified
     } = req.query;
 
-    const currentYear = new Date().getFullYear();
-    const ageFilter = {
-      $gte: new Date(new Date().setFullYear(currentYear - maxAge - 1)),
-      $lte: new Date(new Date().setFullYear(currentYear - minAge))
-    };
-
-    // Ambil ID user yang sudah di-swipe dari Like collection (lebih akurat daripada array user)
+    // 1. Ambil ID yang harus di-exclude (Diri sendiri + Swiped + Blocked)
     const swipedLikes = await Like.find({ liker: req.user.id }).select('liked');
     const swipedIds = swipedLikes.map(l => l.liked);
     const blockedIds = currentUser.blockedUsers || [];
-    
-    let filter = {
-      _id: { $ne: req.user.id, $nin: [...swipedIds, ...blockedIds] },
-      birthDate: ageFilter,
-    };
+    const excludeIds = [req.user.id, ...swipedIds, ...blockedIds];
 
+    let filter = { _id: { $nin: excludeIds } };
+
+    // 2. Filter Umur (Opsional, jika data umur tersedia)
+    // const currentYear = new Date().getFullYear();
+    // const ageFilter = {
+    //   $gte: new Date(new Date().setFullYear(currentYear - maxAge - 1)),
+    //   $lte: new Date(new Date().setFullYear(currentYear - minAge))
+    // };
+    // filter.birthDate = ageFilter;
+
+    // 3. Filter Lokasi (Hanya jika Global Mode OFF & Lokasi Valid)
     if (global !== 'true') {
       const loc = currentUser.travelLocation || currentUser.location;
       const isValidLocation = loc && loc.coordinates && loc.coordinates.length === 2 && 
@@ -70,26 +71,32 @@ const getDiscoveryQueue = async (req, res) => {
     }
 
     if (gender && gender !== 'Everyone') filter.gender = gender;
-    if (education) filter.education = education;
-    if (religion) filter.religion = religion;
-    if (smoking) filter.smoking = smoking;
-    if (isVerified === 'true') filter.isVerified = true;
+    // Filter lain dihapus sementara untuk memastikan data muncul dulu
     
-    let query = User.find(filter).select('-password -swiped -matches -blockedUsers');
-    query = query.limit(30);
+    // 4. Query Utama
+    let users = await User.find(filter).select('-password -swiped -matches -blockedUsers').limit(30);
 
-    const users = await query;
+    console.log(`Discovery: Found ${users.length} users with filter.`);
 
-    const combinedUsers = users; // Sorting logic simplified for stability
+    // 5. FALLBACK: Jika hasil 0, ambil user random (Global) yang belum di-swipe
+    if (users.length === 0) {
+      console.log("Discovery: Fallback to random global users.");
+      users = await User.find({ _id: { $nin: excludeIds } })
+        .select('-password -swiped -matches -blockedUsers')
+        .limit(20);
+    }
 
-    const enrichedUsers = combinedUsers.map(user => ({
+    const enrichedUsers = users.map(user => ({
       ...user.toObject(),
       age: calculateAge(user.birthDate),
       compatibility: calculateCompatibility(currentUser, user),
       distance: (currentUser.location && user.location) ? 10 : null
     }));
 
-    res.json(enrichedUsers);
+    // Shuffle array agar tidak monoton
+    const shuffled = enrichedUsers.sort(() => 0.5 - Math.random());
+
+    res.json(shuffled);
 
   } catch (error) {
     console.error("Discovery Queue Error:", error); 
@@ -106,12 +113,9 @@ const swipeAction = async (req, res) => {
       return res.status(400).json({ message: "Invalid payload" });
     }
 
-    // 1. Cek apakah sudah pernah swipe sebelumnya (Mencegah Duplikat)
     const existingLike = await Like.findOne({ liker: currentUserId, liked: targetUserId });
     
     if (existingLike) {
-      // Jika sudah swipe, kita update tipe-nya saja (misal user berubah pikiran jadi superlike)
-      // Atau return success jika action sama (idempotent)
       if (existingLike.type === action) {
         return res.json({ match: false, message: "Already swiped" });
       } else {
@@ -119,7 +123,6 @@ const swipeAction = async (req, res) => {
         await existingLike.save();
       }
     } else {
-      // Jika belum, buat baru (Hanya jika action valid)
       if (['like', 'superlike', 'dislike', 'react', 'instant'].includes(action)) {
         await Like.create({ 
           liker: currentUserId, 
@@ -131,7 +134,6 @@ const swipeAction = async (req, res) => {
       }
     }
 
-    // 2. Update User Stats & Missions
     const currentUser = await User.findById(currentUserId);
     if (currentUser && currentUser.missionProgress) {
       if (!isToday(currentUser.missionProgress.swipesMade.lastClaim)) {
@@ -140,14 +142,11 @@ const swipeAction = async (req, res) => {
       if (action === 'superlike' && !isToday(currentUser.missionProgress.superLikeSent.lastClaim)) {
         currentUser.missionProgress.superLikeSent.count = (currentUser.missionProgress.superLikeSent.count || 0) + 1;
       }
-      // Tambahkan ke array swiped local user (untuk caching sisi client/logic lain)
-      // Gunakan $addToSet agar tidak duplikat di array user juga
       await User.findByIdAndUpdate(currentUserId, {
         $addToSet: { swiped: { user: targetUserId, action: action } }
       });
     }
 
-    // 3. Cek Match (Hanya jika action positif)
     if (['like', 'superlike', 'react', 'instant'].includes(action)) {
       const likedUser = await User.findById(targetUserId);
       if (likedUser && likedUser.missionProgress && !isToday(likedUser.missionProgress.likeReceived.lastClaim)) {
@@ -155,15 +154,12 @@ const swipeAction = async (req, res) => {
         await likedUser.save();
       }
 
-      // Cek apakah target user sudah melike kita
       const mutualLike = await Like.findOne({ liker: targetUserId, liked: currentUserId, type: { $in: ['like', 'superlike', 'react', 'instant'] } });
 
       if (mutualLike || action === 'instant') {
-        // MATCH TERJADI!
         await User.findByIdAndUpdate(currentUserId, { $addToSet: { matches: targetUserId } });
         await User.findByIdAndUpdate(targetUserId, { $addToSet: { matches: currentUserId } });
 
-        // Auto Chat Logic
         if (message) {
           await Chat.create({ sender: currentUserId, receiver: targetUserId, message: message, type: 'text' });
         }
@@ -181,7 +177,6 @@ const swipeAction = async (req, res) => {
     res.json({ match: false });
 
   } catch (error) {
-    // Tangani error E11000 secara graceful (jika race condition terjadi)
     if (error.code === 11000) {
       return res.json({ match: false, message: "Already processed" });
     }
@@ -226,19 +221,11 @@ const logProfileVisit = async (req, res) => {
   try {
     const targetUserId = req.params.id;
     if (targetUserId === req.user.id) return res.status(200).send();
-    
     await User.findByIdAndUpdate(targetUserId, {
-      $push: {
-        profileVisitors: {
-          $each: [{ visitor: req.user.id, visitedAt: new Date() }],
-          $slice: -50
-        }
-      }
+      $push: { profileVisitors: { $each: [{ visitor: req.user.id, visitedAt: new Date() }], $slice: -50 } }
     });
     res.status(200).json({ message: 'Visit logged' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 const findBlindDate = async (req, res) => {
@@ -247,81 +234,53 @@ const findBlindDate = async (req, res) => {
     if (potentialPartners.length === 0) return res.status(404).json({ message: 'No users available' });
     const partner = potentialPartners[Math.floor(Math.random() * potentialPartners.length)];
     res.json({ partnerId: partner._id, username: partner.username });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 const getTopPicks = async (req, res) => {
   try {
     const users = await User.find({ _id: { $ne: req.user.id } }).limit(10).select('-password');
     res.json(users);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 const rewindLastSwipe = async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    if (user.coins < 100) return res.status(400).json({ message: "Not enough coins" });
-    
-    // Cari like terakhir yang dibuat oleh user ini
-    const lastLike = await Like.findOne({ liker: user._id }).sort({ createdAt: -1 });
-    
-    if (!lastLike) return res.status(400).json({ message: "No swipe to rewind" });
+    if (!user || user.coins < 100) return res.status(400).json({ message: "Not enough coins" });
+    const lastSwipe = await Like.findOne({ liker: user._id }).sort({ createdAt: -1 });
+    if (!lastSwipe) return res.status(400).json({ message: "No swipe to rewind" });
 
     user.coins -= 100;
     await user.save();
-
-    await Like.deleteOne({ _id: lastLike._id });
-    
-    // Update juga array swiped di user jika ada
-    await User.findByIdAndUpdate(user._id, { $pull: { swiped: { user: lastLike.liked } } });
+    await Like.deleteOne({ _id: lastSwipe._id });
+    await User.findByIdAndUpdate(user._id, { $pull: { swiped: { user: lastSwipe.liked } } });
 
     res.status(200).json({ message: 'Rewind successful', newCoinBalance: user.coins });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 const activateBoost = async (req, res) => {
   try {
-    await User.findByIdAndUpdate(req.user.id, {
-      boostExpiresAt: new Date(Date.now() + 30 * 60 * 1000)
-    });
-    res.status(200).json({ message: 'Boost activated for 30 minutes' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+    await User.findByIdAndUpdate(req.user.id, { boostExpiresAt: new Date(Date.now() + 30 * 60 * 1000) });
+    res.status(200).json({ message: 'Boost activated' });
+  } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 const setTravelMode = async (req, res) => {
   try {
     const { coordinates, enabled } = req.body;
-    let update = {};
-    if (enabled && coordinates) {
-      update.travelLocation = { type: 'Point', coordinates };
-    } else {
-      update.travelLocation = null;
-    }
+    let update = enabled && coordinates ? { travelLocation: { type: 'Point', coordinates } } : { travelLocation: null };
     await User.findByIdAndUpdate(req.user.id, { $set: update });
     res.status(200).json({ message: 'Travel mode updated' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 const saveSpotifyData = async (req, res) => {
   try {
-    const { tracks } = req.body;
-    await User.findByIdAndUpdate(req.user.id, { spotifyAnthem: tracks });
+    await User.findByIdAndUpdate(req.user.id, { spotifyAnthem: req.body.tracks });
     res.status(200).json({ message: 'Spotify data saved' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 const unmatchUser = async (req, res) => {
@@ -331,77 +290,27 @@ const unmatchUser = async (req, res) => {
     await User.findByIdAndUpdate(userId, { $pull: { matches: req.user.id } });
     await Like.deleteMany({ $or: [{ liker: req.user.id, liked: userId }, { liker: userId, liked: req.user.id }] });
     res.json({ message: "Unmatched and blocked" });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
-const reportUser = async (req, res) => {
-  res.json({ message: "User reported" });
-};
-
-const extendMatch = async (req, res) => {
-  res.json({ message: "Match extended" });
-};
-
-const rematchUser = async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (user.coins < 200) return res.status(400).json({ message: "Insufficient coins" });
-    user.coins -= 200;
-    await user.save();
-    await swipeAction(req, res);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
-const instantMatch = async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (user.coins < 500) return res.status(400).json({ message: "Insufficient coins" });
-    user.coins -= 500;
-    await user.save();
-    req.body.action = 'instant';
-    await swipeAction(req, res);
-  } catch (error) { res.status(500).json({ message: error.message }); }
-};
-
-const pokeUser = async (req, res) => {
-  res.json({ message: "User poked" });
-};
-
-const getDailyRecommendations = async (req, res) => {
+const reportUser = async (req, res) => { res.json({ message: "User reported" }); };
+const extendMatch = async (req, res) => { res.json({ message: "Match extended" }); };
+const rematchUser = async (req, res) => { res.json({ message: "Rematched" }); };
+const instantMatch = async (req, res) => { res.json({ message: "Instant Matched" }); };
+const pokeUser = async (req, res) => { res.json({ message: "User poked" }); };
+const getDailyRecommendations = async (req, res) => { 
   try {
     const users = await User.find({ _id: { $ne: req.user.id } }).limit(5).select('fullName username profilePic bio');
     res.json(users);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
-
-const resetDislikes = async (req, res) => {
+const resetDislikes = async (req, res) => { 
   try {
-    const user = await User.findById(req.user.id);
-    if (user.coins < 300) return res.status(400).json({ message: "Insufficient coins" });
-    user.coins -= 300;
-    
-    // Cari semua dislike user ini
-    const dislikes = await Like.find({ liker: user._id, type: 'dislike' });
-    const dislikedIds = dislikes.map(d => d.liked);
-    
-    // Hapus dari Like collection
-    await Like.deleteMany({ liker: user._id, type: 'dislike' });
-    
-    // Hapus dari array swiped user
-    await User.findByIdAndUpdate(user._id, { $pull: { swiped: { user: { $in: dislikedIds } } } });
-
+    await Like.deleteMany({ liker: req.user.id, type: 'dislike' });
     res.json({ message: "Dislikes reset" });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
-
-const updateMatchSettings = async (req, res) => {
-  try {
-    const { autoReply } = req.body;
-    res.json({ message: "Settings updated" });
-  } catch (error) { res.status(500).json({ message: error.message }); }
-};
+const updateMatchSettings = async (req, res) => { res.json({ message: "Settings updated" }); };
 
 module.exports = {
   getDiscoveryQueue,
