@@ -5,8 +5,6 @@ const axios = require('axios');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 const cloudinary = require('../config/cloudinary');
-const mongoose = require('mongoose');
-
 const isToday = (someDate) => {
   if (!someDate) return false;
   const today = new Date();
@@ -31,7 +29,6 @@ const streamUpload = (buffer, folder, resourceType = 'auto') => {
     }
   });
 };
-
 const sendMessage = async (req, res) => {
   try {
     const { 
@@ -43,22 +40,17 @@ const sendMessage = async (req, res) => {
     } = req.body;
     
     const senderId = req.user.id;
-    
-    // Normalisasi replyTo
     let replyTo = req.body.replyTo;
     if (!replyTo || replyTo === 'null' || replyTo === 'undefined') replyTo = null;
 
     let isDisappearing = req.body.isDisappearing;
     if (typeof isDisappearing === 'string') isDisappearing = isDisappearing === 'true';
-
     let chatData = { 
       sender: senderId, 
       receiver: receiverId, 
       replyTo, 
       type: type || 'text' 
     };
-
-    // 1. Handle Location
     if (type === 'location') {
       chatData.location = {
         latitude: parseFloat(latitude),
@@ -67,21 +59,16 @@ const sendMessage = async (req, res) => {
       };
       chatData.message = 'Shared a location';
     } 
-    // 2. Handle Text (Tanpa File)
-    else if (!req.file) {
+        else if (!req.file) {
       if (!message && type !== 'sticker') {
         return res.status(400).json({ message: 'Message content is required' });
       }
       chatData.message = message;
     }
-
-    // 3. Handle File Uploads
     if (req.file) {
       if (!req.file.buffer) {
         return res.status(400).json({ message: 'File upload failed: Buffer is empty' });
       }
-
-      // Upload Cloudinary (Image/Video/Audio)
       if (['image', 'audio', 'video'].includes(type)) {
         const resourceType = type === 'image' ? 'image' : 'video'; 
         const folder = `wapps_chat_${type}s`;
@@ -98,7 +85,6 @@ const sendMessage = async (req, res) => {
         };
         chatData.message = message || (type.charAt(0).toUpperCase() + type.slice(1));
       } 
-      // Upload Catbox (File Lainnya)
       else if (type === 'file') {
         try {
           const form = new FormData();
@@ -121,7 +107,6 @@ const sendMessage = async (req, res) => {
           chatData.message = message || req.file.originalname;
         } catch (catboxError) {
           console.error("Catbox Upload Failed, falling back to Cloudinary Raw:", catboxError.message);
-          // Fallback Cloudinary Raw
           const result = await streamUpload(req.file.buffer, 'wapps_chat_files', 'raw');
           chatData.fileInfo = {
             url: result.secure_url,
@@ -133,14 +118,10 @@ const sendMessage = async (req, res) => {
         }
       }
     }
-
     if (isDisappearing) {
       chatData.expireAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     }
-    
     const newChat = await Chat.create(chatData);
-
-    // Update Mission (Opsional, dibungkus try-catch agar tidak memblokir flow utama)
     try {
       const senderUser = await User.findById(senderId);
       if (senderUser && senderUser.missionProgress && !isToday(senderUser.missionProgress.messagesSent.lastClaim)) {
@@ -148,7 +129,6 @@ const sendMessage = async (req, res) => {
         await senderUser.save();
       }
     } catch (ignore) { console.error("Mission Update Error", ignore); }
-
     const fullChat = await Chat.findById(newChat._id)
       .populate('sender', 'username profilePic fullName')
       .populate('replyTo', 'message sender type fileInfo');
@@ -166,8 +146,8 @@ const addReaction = async (req, res) => {
     const { chatId, type } = req.body;
     const chat = await Chat.findById(chatId);
     if (!chat) return res.status(404).json({ message: 'Chat not found' });
-
     chat.reactions = chat.reactions.filter(r => r.user.toString() !== req.user.id);
+    
     chat.reactions.push({ user: req.user.id, type });
     await chat.save();
     
@@ -196,10 +176,10 @@ const getMessages = async (req, res) => {
       .populate('sender', 'username profilePic fullName')
       .populate('replyTo', 'message sender type fileInfo')
       .populate('reactions.user', 'username');
-      
+    const now = new Date();
     await Chat.updateMany(
       { sender: userId, receiver: myId, isRead: false }, 
-      { $set: { isRead: true, readAt: new Date() } }
+      { $set: { isRead: true, readAt: now } }
     );
     
     res.json(messages);
@@ -237,102 +217,65 @@ const setChatPreference = async (req, res) => {
 
 const getConversations = async (req, res) => {
   try {
-    // FIX: Gunakan Aggregation Pipeline agar lebih stabil dan performa tinggi
-    const currentUserId = new mongoose.Types.ObjectId(req.user.id);
-
-    // 1. Ambil Preferences (Pinned chats)
-    const prefs = await ChatPreference.find({ user: req.user.id, isPinned: true });
+    const currentUserId = req.user.id;
+    const prefs = await ChatPreference.find({ user: currentUserId, isPinned: true });
     const pinnedIds = prefs.map(p => p.targetUser.toString());
+    const chats = await Chat.find({ 
+      $or: [{ sender: currentUserId }, { receiver: currentUserId }] 
+    }).sort({ createdAt: -1 });
 
-    // 2. Aggregation Pipeline
-    const conversations = await Chat.aggregate([
-      // A. Filter chat yang melibatkan user kita
-      {
-        $match: {
-          $or: [{ sender: currentUserId }, { receiver: currentUserId }]
-        }
-      },
-      // B. Sort time desc agar $first mengambil pesan terakhir
-      { $sort: { createdAt: -1 } },
-      // C. Group berdasarkan lawan bicara
-      {
-        $group: {
-          _id: {
-            $cond: [{ $eq: ["$sender", currentUserId] }, "$receiver", "$sender"]
-          },
-          lastMessage: { $first: "$$ROOT" },
-          unreadCount: {
-            $sum: {
-              $cond: [
-                { $and: [{ $eq: ["$receiver", currentUserId] }, { $eq: ["$isRead", false] }] },
-                1,
-                0
-              ]
-            }
-          }
-        }
-      },
-      // D. Join User Info
-      {
-        $lookup: {
-          from: "users",
-          localField: "_id",
-          foreignField: "_id",
-          as: "userDetails"
-        }
-      },
-      { $unwind: "$userDetails" },
-      // E. Project Result
-      {
-        $project: {
-          userId: "$userDetails._id",
-          username: "$userDetails.username",
-          fullName: "$userDetails.fullName",
-          profilePic: "$userDetails.profilePic",
-          isOnline: "$userDetails.isOnline",
-          lastMessageContent: "$lastMessage.message",
-          lastMessageType: "$lastMessage.type",
-          timestamp: "$lastMessage.createdAt",
-          unreadCount: 1
-        }
-      }
+    const conversationMap = new Map();
+    const unreadMap = new Map();
+    const unreadCounts = await Chat.aggregate([
+      { $match: { receiver: new require('mongoose').Types.ObjectId(currentUserId), isRead: false } },
+      { $group: { _id: "$sender", count: { $sum: 1 } } }
     ]);
+    
+    unreadCounts.forEach(u => unreadMap.set(u._id.toString(), u.count));
 
-    // 3. Formatting Data
-    const results = conversations.map(c => {
-      let preview = c.lastMessageContent;
-      if (c.lastMessageType !== 'text') {
-        if (c.lastMessageType === 'image') preview = '📷 Image';
-        else if (c.lastMessageType === 'video') preview = '🎥 Video';
-        else if (c.lastMessageType === 'audio') preview = '🎵 Audio';
-        else if (c.lastMessageType === 'file') preview = '📁 File';
-        else if (c.lastMessageType === 'location') preview = '📍 Location';
+    chats.forEach(chat => {
+      const otherId = chat.sender.toString() === currentUserId ? chat.receiver.toString() : chat.sender.toString();
+      
+      if (!conversationMap.has(otherId)) {
+        conversationMap.set(otherId, { 
+          lastMessage: chat, 
+          isPinned: pinnedIds.includes(otherId),
+          unreadCount: unreadMap.get(otherId) || 0
+        });
       }
-
-      return {
-        userId: c.userId,
-        username: c.username,
-        fullName: c.fullName,
-        profilePic: c.profilePic,
-        isOnline: c.isOnline || false,
-        lastMessage: preview || '',
-        timestamp: c.timestamp,
-        unreadCount: c.unreadCount,
-        isPinned: pinnedIds.includes(c.userId.toString())
-      };
     });
 
-    // 4. Sort Final
-    results.sort((a, b) => {
-      if (a.isPinned === b.isPinned) {
-        return new Date(b.timestamp) - new Date(a.timestamp);
+    const results = [];
+    for (let [id, data] of conversationMap) {
+      const user = await User.findById(id).select('username fullName profilePic isOnline lastActive');
+      if (user) {
+        let previewText = data.lastMessage.message;
+        if (data.lastMessage.type !== 'text') {
+          previewText = data.lastMessage.type === 'location' 
+            ? '📍 Shared a location' 
+            : `Sent a ${data.lastMessage.type}`;
+        }
+
+        results.push({
+          userId: user._id,
+          username: user.username,
+          fullName: user.fullName,
+          profilePic: user.profilePic,
+          isOnline: user.isOnline, 
+          lastMessage: previewText,
+          timestamp: data.lastMessage.createdAt,
+          isPinned: data.isPinned,
+          unreadCount: data.unreadCount
+        });
       }
+    }
+    results.sort((a, b) => {
+      if (a.isPinned === b.isPinned) return new Date(b.timestamp) - new Date(a.timestamp);
       return a.isPinned ? -1 : 1;
     });
 
     res.json(results);
   } catch (error) {
-    console.error("Get Conversations Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
