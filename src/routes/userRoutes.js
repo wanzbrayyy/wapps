@@ -18,10 +18,12 @@ router.get('/', protect, getAllUsers);
 router.get('/profile', protect, getProfile);
 router.put('/profile', protect, updateProfile);
 router.post('/upload-profile-pic', protect, upload.single('profilePic'), uploadProfilePic);
-router.get('/:id', protect, getUserById);
+
 router.post('/:id/follow', protect, followUser);
 router.post('/:id/unfollow', protect, unfollowUser);
 router.post('/:id/block', protect, blockUser);
 router.post('/:id/unblock', protect, unblockUser);
+
+router.get('/:id', protect, getUserById);
 
 module.exports = router;

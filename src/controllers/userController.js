@@ -26,9 +26,10 @@ const getAllUsers = async (req, res) => {
         _id: { 
           $ne: req.user.id,
           $nin: blockedIds 
-        } 
+        },
+        accountStatus: 'Active' 
       })
-      .select('username fullName profilePic email');
+      .select('username fullName profilePic email isOnline');
 
     res.json(users);
   } catch (error) {
@@ -43,9 +44,15 @@ const getProfile = async (req, res) => {
       .populate('followers', 'username profilePic fullName')
       .populate('following', 'username profilePic fullName')
       .populate('profileVisitors.visitor', 'username profilePic fullName')
-      .populate('blockedUsers', 'username profilePic');
+      .populate('blockedUsers', 'username profilePic')
+      .populate('currentRoom', 'title');
 
     if (!user) return res.status(404).json({ message: 'User not found' });
+    
+    user.isOnline = true;
+    user.lastActive = new Date();
+    await user.save();
+
     res.json(user);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -57,7 +64,8 @@ const getUserById = async (req, res) => {
     const user = await User.findById(req.params.id)
       .select('-password -resetPasswordToken -resetPasswordExpire')
       .populate('followers', 'username profilePic')
-      .populate('following', 'username profilePic');
+      .populate('following', 'username profilePic')
+      .populate('currentRoom', 'title');
 
     if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -93,7 +101,9 @@ const updateProfile = async (req, res) => {
     const { 
       fullName, bio, birthDate, gender, interestedIn, height, 
       education, religion, smoking, relationshipIntent,
-      fcmToken, darkMode, notificationSettings 
+      fcmToken, darkMode, notificationSettings,
+      gallery, voiceBio, videoBio, instagramHandle, spotifyAnthem,
+      accountStatus, isOnline, isLive, currentRoom
     } = req.body;
     
     const user = await User.findById(req.user.id);
@@ -110,6 +120,17 @@ const updateProfile = async (req, res) => {
     if (smoking) user.smoking = smoking;
     if (relationshipIntent) user.relationshipIntent = relationshipIntent;
     
+    if (gallery) user.gallery = gallery;
+    if (voiceBio) user.voiceBio = voiceBio;
+    if (videoBio) user.videoBio = videoBio;
+    if (instagramHandle) user.instagramHandle = instagramHandle;
+    if (spotifyAnthem) user.spotifyAnthem = spotifyAnthem;
+    
+    if (accountStatus) user.accountStatus = accountStatus;
+    if (isOnline !== undefined) user.isOnline = isOnline;
+    if (isLive !== undefined) user.isLive = isLive;
+    if (currentRoom !== undefined) user.currentRoom = currentRoom;
+
     if (fcmToken) user.fcmToken = fcmToken;
     if (darkMode !== undefined) user.darkMode = darkMode;
     if (notificationSettings) {
@@ -164,9 +185,6 @@ const followUser = async (req, res) => {
     if (!userToFollow.followers.includes(req.user.id)) {
       await userToFollow.updateOne({ $push: { followers: req.user.id } });
       await currentUser.updateOne({ $push: { following: req.params.id } });
-      
-      // Logic notifikasi follow bisa ditambahkan di sini (misal trigger FCM)
-      
       res.status(200).json({ message: "User followed" });
     } else {
       res.status(400).json({ message: "You already follow this user" });
@@ -210,13 +228,11 @@ const blockUser = async (req, res) => {
     if (!currentUser.blockedUsers.includes(id)) {
       currentUser.blockedUsers.push(id);
       
-      // Remove from following/followers if blocked
       currentUser.following = currentUser.following.filter(uid => uid.toString() !== id);
       currentUser.followers = currentUser.followers.filter(uid => uid.toString() !== id);
       
       await currentUser.save();
       
-      // Also remove current user from the blocked user's lists
       await User.findByIdAndUpdate(id, {
         $pull: { followers: req.user.id, following: req.user.id }
       });

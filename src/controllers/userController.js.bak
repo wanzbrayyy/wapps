@@ -1,12 +1,17 @@
 const User = require('../models/user');
-const cloudinary = require('cloudinary').v2; 
+const cloudinary = require('cloudinary').v2;
+
 const isToday = (someDate) => {
   if (!someDate) return false;
   const today = new Date();
   return new Date(someDate).toDateString() === today.toDateString();
 };
+
 const getAllUsers = async (req, res) => {
   try {
+    const currentUser = await User.findById(req.user.id);
+    const blockedIds = currentUser.blockedUsers || [];
+
     const keyword = req.query.search
       ? {
           $or: [
@@ -17,7 +22,12 @@ const getAllUsers = async (req, res) => {
       : {};
 
     const users = await User.find(keyword)
-      .find({ _id: { $ne: req.user.id } })
+      .find({ 
+        _id: { 
+          $ne: req.user.id,
+          $nin: blockedIds 
+        } 
+      })
       .select('username fullName profilePic email');
 
     res.json(users);
@@ -31,7 +41,10 @@ const getProfile = async (req, res) => {
     const user = await User.findById(req.user.id)
       .select('-password')
       .populate('followers', 'username profilePic fullName')
-      .populate('following', 'username profilePic fullName');
+      .populate('following', 'username profilePic fullName')
+      .populate('profileVisitors.visitor', 'username profilePic fullName')
+      .populate('blockedUsers', 'username profilePic');
+
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json(user);
   } catch (error) {
@@ -48,6 +61,23 @@ const getUserById = async (req, res) => {
 
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    if (req.user.id !== req.params.id) {
+      const hasVisitedToday = user.profileVisitors.some(
+        (v) => v.visitor.toString() === req.user.id && isToday(v.visitedAt)
+      );
+
+      if (!hasVisitedToday) {
+        await User.findByIdAndUpdate(req.params.id, {
+          $push: { 
+            profileVisitors: { 
+              visitor: req.user.id,
+              visitedAt: new Date()
+            } 
+          }
+        });
+      }
+    }
+
     const isFollowing = user.followers.some(
       (follower) => follower._id.toString() === req.user.id
     );
@@ -60,31 +90,41 @@ const getUserById = async (req, res) => {
 
 const updateProfile = async (req, res) => {
   try {
-    const { fullName, bio, birthDate, gender, interestedIn, height, education, religion, smoking, relationshipIntent } = req.body;
+    const { 
+      fullName, bio, birthDate, gender, interestedIn, height, 
+      education, religion, smoking, relationshipIntent,
+      fcmToken, darkMode, notificationSettings 
+    } = req.body;
     
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    user.fullName = fullName ?? user.fullName;
-    user.bio = bio ?? user.bio;
-    user.birthDate = birthDate ?? user.birthDate;
-    user.gender = gender ?? user.gender;
-    user.interestedIn = interestedIn ?? user.interestedIn;
-    user.height = height ?? user.height;
-    user.education = education ?? user.education;
-    user.religion = religion ?? user.religion;
-    user.smoking = smoking ?? user.smoking;
-    user.relationshipIntent = relationshipIntent ?? user.relationshipIntent;
+    if (fullName) user.fullName = fullName;
+    if (bio) user.bio = bio;
+    if (birthDate) user.birthDate = birthDate;
+    if (gender) user.gender = gender;
+    if (interestedIn) user.interestedIn = interestedIn;
+    if (height) user.height = height;
+    if (education) user.education = education;
+    if (religion) user.religion = religion;
+    if (smoking) user.smoking = smoking;
+    if (relationshipIntent) user.relationshipIntent = relationshipIntent;
+    
+    if (fcmToken) user.fcmToken = fcmToken;
+    if (darkMode !== undefined) user.darkMode = darkMode;
+    if (notificationSettings) {
+      user.notificationSettings = { ...user.notificationSettings, ...notificationSettings };
+    }
 
-    // Di dalam updateProfile, setelah user.save() berhasil:
-const updatedUser = await user.save();
-// Mission Tracking: Update Profile
-if (!isToday(updatedUser.missionProgress.profileUpdated.lastClaim)) {
-    updatedUser.missionProgress.profileUpdated.lastClaim = new Date();
-    updatedUser.coins += 50;
-    await updatedUser.save();
-}
-res.json(updatedUser);
+    const updatedUser = await user.save();
+
+    if (!isToday(updatedUser.missionProgress.profileUpdated.lastClaim)) {
+        updatedUser.missionProgress.profileUpdated.lastClaim = new Date();
+        updatedUser.coins += 50;
+        await updatedUser.save();
+    }
+    
+    res.json(updatedUser);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -124,6 +164,9 @@ const followUser = async (req, res) => {
     if (!userToFollow.followers.includes(req.user.id)) {
       await userToFollow.updateOne({ $push: { followers: req.user.id } });
       await currentUser.updateOne({ $push: { following: req.params.id } });
+      
+      // Logic notifikasi follow bisa ditambahkan di sini (misal trigger FCM)
+      
       res.status(200).json({ message: "User followed" });
     } else {
       res.status(400).json({ message: "You already follow this user" });
@@ -158,6 +201,46 @@ const unfollowUser = async (req, res) => {
   }
 };
 
+const blockUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (req.user.id === id) return res.status(400).json({ message: "Cannot block yourself" });
+
+    const currentUser = await User.findById(req.user.id);
+    if (!currentUser.blockedUsers.includes(id)) {
+      currentUser.blockedUsers.push(id);
+      
+      // Remove from following/followers if blocked
+      currentUser.following = currentUser.following.filter(uid => uid.toString() !== id);
+      currentUser.followers = currentUser.followers.filter(uid => uid.toString() !== id);
+      
+      await currentUser.save();
+      
+      // Also remove current user from the blocked user's lists
+      await User.findByIdAndUpdate(id, {
+        $pull: { followers: req.user.id, following: req.user.id }
+      });
+    }
+    res.json({ message: "User blocked" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const unblockUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const currentUser = await User.findById(req.user.id);
+    
+    currentUser.blockedUsers = currentUser.blockedUsers.filter(uid => uid.toString() !== id);
+    await currentUser.save();
+    
+    res.json({ message: "User unblocked" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getProfile,
@@ -165,5 +248,7 @@ module.exports = {
   uploadProfilePic,
   getUserById,
   followUser,
-  unfollowUser
+  unfollowUser,
+  blockUser,
+  unblockUser
 };

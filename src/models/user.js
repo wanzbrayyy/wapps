@@ -46,6 +46,18 @@ const userSchema = new mongoose.Schema({
   smoking: { type: String, enum: ['Yes', 'No', 'Sometimes'] },
   relationshipIntent: { type: String, enum: ['Serious', 'Casual', 'Friends'] },
   
+  isOnline: { type: Boolean, default: false },
+  lastActive: { type: Date, default: Date.now },
+  isLive: { type: Boolean, default: false },
+  currentRoom: { type: mongoose.Schema.Types.ObjectId, ref: 'Room', default: null },
+  accountStatus: { type: String, enum: ['Active', 'Paused', 'Suspended'], default: 'Active' },
+
+  gallery: [{ type: String }],
+  voiceBio: { type: String, default: '' },
+  videoBio: { type: String, default: '' },
+  instagramHandle: { type: String, default: '' },
+  spotifyAnthem: { type: String, default: '' },
+
   swiped: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, action: { type: String, enum: ['like', 'dislike', 'superlike'] } }],
   matches: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   boostExpiresAt: { type: Date },

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+
 const missionProgressSchema = new mongoose.Schema({
   lastLoginClaim: { type: Date },
   messagesSent: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
@@ -10,6 +11,14 @@ const missionProgressSchema = new mongoose.Schema({
   profileUpdated: { lastClaim: { type: Date } },
   likeReceived: { count: { type: Number, default: 0 }, lastClaim: { type: Date } },
   appShared: { lastClaim: { type: Date } },
+}, { _id: false });
+
+const notificationSettingsSchema = new mongoose.Schema({
+  newChat: { type: Boolean, default: true },
+  profileVisitor: { type: Boolean, default: true },
+  newFollower: { type: Boolean, default: true },
+  incomingCall: { type: Boolean, default: true },
+  matchUpdates: { type: Boolean, default: true },
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
@@ -36,11 +45,26 @@ const userSchema = new mongoose.Schema({
   religion: { type: String },
   smoking: { type: String, enum: ['Yes', 'No', 'Sometimes'] },
   relationshipIntent: { type: String, enum: ['Serious', 'Casual', 'Friends'] },
+  
   swiped: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, action: { type: String, enum: ['like', 'dislike', 'superlike'] } }],
   matches: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   boostExpiresAt: { type: Date },
+  
   resetPasswordToken: String,
   resetPasswordExpire: Date,
+
+  fcmToken: { type: String, default: '' },
+  darkMode: { type: Boolean, default: false },
+  
+  notificationSettings: { type: notificationSettingsSchema, default: () => ({}) },
+  
+  profileVisitors: [{
+    visitor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    visitedAt: { type: Date, default: Date.now }
+  }],
+
+  blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  
 }, { timestamps: true });
 
 userSchema.index({ location: '2dsphere' });
