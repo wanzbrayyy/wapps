@@ -20,20 +20,25 @@ const chatSchema = new mongoose.Schema({
   message: { type: String, trim: true },
   type: { 
     type: String, 
-    enum: ['text', 'image', 'file', 'audio', 'video', 'sticker', 'location', 'system'], 
+    enum: ['text', 'image', 'file', 'audio', 'video', 'gif', 'sticker', 'location', 'system'], 
     default: 'text' 
   },
   
   fileInfo: { type: fileInfoSchema },
   location: { type: locationSchema },
+  forwardedFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', default: null },
 
   isRead: { type: Boolean, default: false },
+  deliveredAt: { type: Date, default: Date.now },
   readAt: { type: Date }, 
+  editedAt: { type: Date },
   replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', default: null },
   reactions: [{ 
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
     type: { type: String, enum: ['like', 'love', 'laugh', 'sad', 'angry', 'wow'] } 
   }],
+  starredBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  deletedForEveryone: { type: Boolean, default: false },
   expireAt: { type: Date, default: undefined },
   deletedFor: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
 

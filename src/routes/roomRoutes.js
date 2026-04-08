@@ -14,14 +14,18 @@ const {
   sendGift,
   createEvent,
   sendRoomMessage,
-  getRoomMessages
+  getRoomMessages,
+  getThreadMessages,
+  pinRoomMessage,
+  unpinRoomMessage
 } = require('../controllers/roomController');
 const { protect } = require('../middleware/authMiddleware');
+const upload = require('../middleware/uploadMiddleware');
 
-router.post('/', protect, createRoom);
+router.post('/', protect, upload.single('roomImage'), createRoom);
 router.get('/', protect, getAllRooms);
 
-router.put('/image', protect, updateRoomImage);
+router.put('/image', protect, upload.single('roomImage'), updateRoomImage);
 
 router.get('/:id', protect, getRoomById);
 router.post('/:id/join', protect, joinRoom);
@@ -33,5 +37,8 @@ router.post('/:id/gift', protect, sendGift);
 router.post('/:id/events', protect, createEvent);
 router.get('/:id/messages', protect, getRoomMessages);
 router.post('/:id/messages', protect, sendRoomMessage);
+router.get('/:id/messages/:messageId/thread', protect, getThreadMessages);
+router.post('/:id/messages/:messageId/pin', protect, pinRoomMessage);
+router.delete('/:id/messages/pin', protect, unpinRoomMessage);
 
 module.exports = router;

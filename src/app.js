@@ -6,6 +6,8 @@ const chatRoutes = require('./routes/chatRoutes');
 const roomRoutes = require('./routes/roomRoutes');
 const matchRoutes = require('./routes/matchRoutes');
 const missionRoutes = require('./routes/missionRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
+const callRoutes = require('./routes/callRoutes');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 
 // Menangkap error "Unhandled Rejection: [object Object]" agar terbaca di Log
@@ -38,6 +40,8 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/match', matchRoutes);
 app.use('/api/missions', missionRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/calls', callRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

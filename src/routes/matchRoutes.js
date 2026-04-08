@@ -20,14 +20,16 @@ const {
   pokeUser,
   getDailyRecommendations,
   resetDislikes,
-  updateMatchSettings
+  updateMatchSettings,
+  getReportHistory
 } = require('../controllers/matchController');
 const { protect } = require('../middleware/authMiddleware');
 router.get('/discovery', protect, getDiscoveryQueue);
 router.get('/matches', protect, getMatches);
 router.get('/likes', protect, getWhoLikedMe);
 router.get('/top-picks', protect, getTopPicks);
-router.get('/daily-recommendations', protect, getDailyRecommendations); 
+router.get('/daily-recommendations', protect, getDailyRecommendations);
+router.get('/report-history', protect, getReportHistory);
 router.post('/swipe', protect, swipeAction);
 router.post('/visit/:id', protect, logProfileVisit);
 router.post('/blind-date/find', protect, findBlindDate);

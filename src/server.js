@@ -50,6 +50,18 @@ io.on("connection", (socket) => {
     socket.join(roomId);
   });
 
+  socket.on("call:join", (roomId) => {
+    socket.join(roomId);
+  });
+
+  socket.on("call:signal", (data) => {
+    socket.to(data.roomId).emit("call:signal", data);
+  });
+
+  socket.on("call:status", (data) => {
+    socket.to(data.roomId).emit("call:status", data);
+  });
+
   socket.on("disconnect", () => {
     console.log("Socket disconnected");
   });

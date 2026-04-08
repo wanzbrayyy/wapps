@@ -21,6 +21,8 @@ const roomSchema = new mongoose.Schema({
   
   bannedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
+  pinnedMessage: { type: mongoose.Schema.Types.ObjectId, ref: 'RoomMessage', default: null },
+
   events: [eventSchema]
 }, { timestamps: true });
 

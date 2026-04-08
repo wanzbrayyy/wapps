@@ -13,13 +13,36 @@ const roomMessageSchema = new mongoose.Schema({
   },
   message: {
     type: String,
-    required: true,
+    default: '',
     trim: true
   },
   type: {
     type: String,
-    enum: ['text', 'image', 'system'],
+    enum: ['text', 'image', 'system', 'gif', 'sticker'],
     default: 'text'
+  },
+  fileInfo: {
+    url: { type: String, default: '' },
+    stickerId: { type: String, default: '' },
+    label: { type: String, default: '' }
+  },
+  mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  replyTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'RoomMessage',
+    default: null
+  },
+  threadRoot: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'RoomMessage',
+    default: null
+  },
+  isPinned: { type: Boolean, default: false },
+  pinnedAt: { type: Date, default: null },
+  pinnedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   }
 }, {
   timestamps: true

@@ -21,6 +21,21 @@ const notificationSettingsSchema = new mongoose.Schema({
   matchUpdates: { type: Boolean, default: true },
 }, { _id: false });
 
+const matchSettingsSchema = new mongoose.Schema({
+  minAge: { type: Number, default: 18 },
+  maxAge: { type: Number, default: 99 },
+  maxDistanceKm: { type: Number, default: 5000 },
+  preferredGender: { type: String, enum: ['Men', 'Women', 'Everyone'], default: 'Everyone' },
+  globalMode: { type: Boolean, default: false },
+  autoReply: { type: String, default: '' }
+}, { _id: false });
+
+const matchExtensionSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  expiresAt: { type: Date, required: true },
+  extendedAt: { type: Date, default: Date.now }
+}, { _id: false });
+
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   fullName: { type: String, required: true },
@@ -45,6 +60,9 @@ const userSchema = new mongoose.Schema({
   religion: { type: String },
   smoking: { type: String, enum: ['Yes', 'No', 'Sometimes'] },
   relationshipIntent: { type: String, enum: ['Serious', 'Casual', 'Friends'] },
+  zodiacSign: { type: String, default: '' },
+  mbti: { type: String, default: '' },
+  passions: [{ type: String }],
   
   isOnline: { type: Boolean, default: false },
   lastActive: { type: Date, default: Date.now },
@@ -60,6 +78,8 @@ const userSchema = new mongoose.Schema({
 
   swiped: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, action: { type: String, enum: ['like', 'dislike', 'superlike'] } }],
   matches: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  matchExtensions: { type: [matchExtensionSchema], default: [] },
+  matchSettings: { type: matchSettingsSchema, default: () => ({}) },
   boostExpiresAt: { type: Date },
   
   resetPasswordToken: String,

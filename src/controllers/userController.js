@@ -1,6 +1,19 @@
 const User = require('../models/user');
 const cloudinary = require('cloudinary').v2;
 
+const parseArrayField = (value) => {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+    } catch (_) {
+      return value.split(',').map((item) => item.trim()).filter(Boolean);
+    }
+  }
+  return [];
+};
+
 const isToday = (someDate) => {
   if (!someDate) return false;
   const today = new Date();
@@ -103,7 +116,8 @@ const updateProfile = async (req, res) => {
       education, religion, smoking, relationshipIntent,
       fcmToken, darkMode, notificationSettings,
       gallery, voiceBio, videoBio, instagramHandle, spotifyAnthem,
-      accountStatus, isOnline, isLive, currentRoom
+      accountStatus, isOnline, isLive, currentRoom,
+      zodiac, zodiacSign, mbti, passions, location
     } = req.body;
     
     const user = await User.findById(req.user.id);
@@ -119,8 +133,18 @@ const updateProfile = async (req, res) => {
     if (religion) user.religion = religion;
     if (smoking) user.smoking = smoking;
     if (relationshipIntent) user.relationshipIntent = relationshipIntent;
+    if (zodiacSign || zodiac) user.zodiacSign = zodiacSign || zodiac;
+    if (mbti !== undefined) user.mbti = mbti;
+    if (passions !== undefined) user.passions = parseArrayField(passions);
+
+    if (location && Array.isArray(location.coordinates) && location.coordinates.length === 2) {
+      user.location = {
+        type: 'Point',
+        coordinates: location.coordinates.map((coord) => Number(coord))
+      };
+    }
     
-    if (gallery) user.gallery = gallery;
+    if (gallery !== undefined) user.gallery = parseArrayField(gallery);
     if (voiceBio) user.voiceBio = voiceBio;
     if (videoBio) user.videoBio = videoBio;
     if (instagramHandle) user.instagramHandle = instagramHandle;
@@ -146,6 +170,48 @@ const updateProfile = async (req, res) => {
     }
     
     res.json(updatedUser);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const uploadGalleryImages = async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ message: 'No gallery files uploaded' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const incomingUrls = req.files.map((file) => file.path).filter(Boolean);
+    user.gallery = [...(user.gallery || []), ...incomingUrls].slice(0, 12);
+    await user.save();
+
+    res.json({
+      message: 'Gallery updated',
+      gallery: user.gallery
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Gallery upload failed: ' + error.message });
+  }
+};
+
+const deleteGalleryImage = async (req, res) => {
+  try {
+    const { imageUrl } = req.body;
+    if (!imageUrl) return res.status(400).json({ message: 'imageUrl is required' });
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user.gallery = (user.gallery || []).filter((url) => url !== imageUrl);
+    await user.save();
+
+    res.json({
+      message: 'Gallery image removed',
+      gallery: user.gallery
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -262,6 +328,8 @@ module.exports = {
   getProfile,
   updateProfile,
   uploadProfilePic,
+  uploadGalleryImages,
+  deleteGalleryImage,
   getUserById,
   followUser,
   unfollowUser,
