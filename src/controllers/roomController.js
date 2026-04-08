@@ -37,8 +37,16 @@ const populateRoomMessageQuery = (query) => query
   })
   .populate('pinnedBy', 'username fullName');
 
+const toIdString = (entry) => {
+  if (!entry) return '';
+  if (typeof entry === 'string') return entry;
+  if (entry instanceof mongoose.Types.ObjectId) return entry.toString();
+  if (entry._id) return entry._id.toString();
+  return entry.toString();
+};
+
 const roomHasUser = (room, userId, field = 'participants') =>
-  (room[field] || []).some((entry) => entry.toString() === userId);
+  (room[field] || []).some((entry) => toIdString(entry) === userId);
 
 const canManageRoom = (room, userId) =>
   room.creator.toString() === userId ||
@@ -46,7 +54,7 @@ const canManageRoom = (room, userId) =>
   roomHasUser(room, userId, 'moderators');
 
 const resolveMentionedUserIds = (room, message, mentionedUserIds = []) => {
-  const participantIds = new Set((room.participants || []).map((userId) => userId.toString()));
+  const participantIds = new Set((room.participants || []).map((userId) => toIdString(userId)));
   const explicitIds = Array.isArray(mentionedUserIds)
     ? mentionedUserIds.filter(Boolean).map((userId) => userId.toString())
     : [];
@@ -64,7 +72,7 @@ const resolveMentionedUserIds = (room, message, mentionedUserIds = []) => {
       const username = participant.username || '';
       return usernamesInText.includes(username.toLowerCase());
     })
-    .map((participant) => participant._id.toString());
+    .map((participant) => toIdString(participant));
 
   return [...new Set([...explicitIds, ...matchedIds])]
     .filter((userId) => participantIds.has(userId));

@@ -27,13 +27,23 @@ const matchSettingsSchema = new mongoose.Schema({
   maxDistanceKm: { type: Number, default: 5000 },
   preferredGender: { type: String, enum: ['Men', 'Women', 'Everyone'], default: 'Everyone' },
   globalMode: { type: Boolean, default: false },
-  autoReply: { type: String, default: '' }
+  autoReply: { type: String, default: '' },
+  education: { type: String, default: '' },
+  religion: { type: String, default: '' },
+  smoking: { type: String, default: '' },
+  relationshipIntent: { type: String, default: '' }
 }, { _id: false });
 
 const matchExtensionSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   expiresAt: { type: Date, required: true },
   extendedAt: { type: Date, default: Date.now }
+}, { _id: false });
+
+const availabilitySchema = new mongoose.Schema({
+  day: { type: String, required: true },
+  startHour: { type: String, required: true },
+  endHour: { type: String, required: true }
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
@@ -96,6 +106,8 @@ const userSchema = new mongoose.Schema({
   }],
 
   blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  savedProfiles: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  dateAvailability: { type: [availabilitySchema], default: [] },
   
 }, { timestamps: true });
 

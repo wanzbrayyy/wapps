@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 const fileInfoSchema = new mongoose.Schema({
   url: String,
   name: String,
+  label: String,
+  stickerId: String,
   size: Number,
   mimeType: String,
   duration: Number, 

@@ -1,7 +1,15 @@
+const mongoose = require('mongoose');
 const User = require('../models/user');
 const Like = require('../models/like');
 const Chat = require('../models/chat');
 const Report = require('../models/report');
+const MatchRecord = require('../models/matchRecord');
+const DatePlan = require('../models/datePlan');
+const SafetyCheckIn = require('../models/safetyCheckIn');
+const Poke = require('../models/poke');
+const { createNotification } = require('../services/notificationService');
+
+const MATCH_DURATION_DAYS = 7;
 
 const isToday = (someDate) => {
   if (!someDate) return false;
@@ -16,19 +24,80 @@ const calculateAge = (birthDate) => {
   return Math.abs(ageDate.getUTCFullYear() - 1970);
 };
 
+const haversineKm = (coordA = [], coordB = []) => {
+  if (!Array.isArray(coordA) || !Array.isArray(coordB) || coordA.length < 2 || coordB.length < 2) return null;
+  const [lon1, lat1] = coordA.map(Number);
+  const [lon2, lat2] = coordB.map(Number);
+  if ([lon1, lat1, lon2, lat2].some((value) => Number.isNaN(value))) return null;
+
+  const toRad = (value) => value * (Math.PI / 180);
+  const earthRadiusKm = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(earthRadiusKm * c * 10) / 10;
+};
+
+const normalizePair = (user1, user2) => {
+  const [first, second] = [user1.toString(), user2.toString()].sort();
+  return { userA: first, userB: second };
+};
+
+const getPairQuery = (user1, user2) => normalizePair(user1, user2);
+
 const calculateCompatibility = (user1, user2) => {
-  let score = 0;
+  let score = 35;
 
   if (Array.isArray(user1.passions) && Array.isArray(user2.passions)) {
-    const commonInterests = user1.passions.filter((passion) => user2.passions.includes(passion));
-    score += commonInterests.length * 10;
+    const commonPassions = user1.passions.filter((passion) => user2.passions.includes(passion));
+    score += Math.min(commonPassions.length * 12, 36);
   }
 
-  if (user1.zodiacSign && user2.zodiacSign && user1.zodiacSign === user2.zodiacSign) score += 5;
-  if (user1.religion && user1.religion === user2.religion) score += 10;
+  if (user1.zodiacSign && user2.zodiacSign && user1.zodiacSign === user2.zodiacSign) score += 6;
+  if (user1.religion && user1.religion === user2.religion) score += 12;
   if (user1.smoking && user1.smoking === user2.smoking) score += 10;
+  if (user1.education && user1.education === user2.education) score += 8;
+  if (user1.relationshipIntent && user1.relationshipIntent === user2.relationshipIntent) score += 12;
 
-  return Math.min(score + 50, 100);
+  return Math.min(score, 99);
+};
+
+const buildSummaryParts = (currentUser, targetUser) => {
+  const sharedPassions = (currentUser.passions || []).filter((passion) => (targetUser.passions || []).includes(passion));
+  const reasons = [];
+  if (sharedPassions.length > 0) reasons.push(`kalian sama-sama suka ${sharedPassions.slice(0, 2).join(' dan ')}`);
+  if (currentUser.religion && currentUser.religion === targetUser.religion) reasons.push('punya nilai spiritual yang mirip');
+  if (currentUser.relationshipIntent && currentUser.relationshipIntent === targetUser.relationshipIntent) reasons.push('sedang mencari jenis hubungan yang sama');
+  if (currentUser.smoking && currentUser.smoking === targetUser.smoking) reasons.push('punya preferensi lifestyle yang cocok');
+  if (reasons.length === 0) reasons.push('profil kalian terlihat saling melengkapi');
+  return { sharedPassions, reasons };
+};
+
+const buildAiIcebreaker = (currentUser, targetUser) => {
+  const { sharedPassions } = buildSummaryParts(currentUser, targetUser);
+  if (sharedPassions.length > 0) {
+    return `Aku lihat kita sama-sama suka ${sharedPassions[0]}. Kalau weekend ideal versi kamu, biasanya ngapain?`;
+  }
+  if (targetUser.bio) {
+    return 'Bio kamu bikin penasaran. Hal paling seru yang lagi kamu kejar minggu ini apa?';
+  }
+  return 'Kalau kita ketemu buat first date yang santai, kamu lebih pilih coffee, sunset walk, atau live music?';
+};
+
+const buildAiMatchSummary = (currentUser, targetUser) => {
+  const { reasons } = buildSummaryParts(currentUser, targetUser);
+  return `Cocok karena ${reasons.slice(0, 2).join(' dan ')}.`;
+};
+
+const getCurrentCoordinates = (user) => {
+  const source = user.travelLocation && Array.isArray(user.travelLocation.coordinates) && user.travelLocation.coordinates.length === 2
+    ? user.travelLocation
+    : user.location;
+  return source?.coordinates || [0, 0];
 };
 
 const getEffectiveSettings = (user, query) => {
@@ -39,33 +108,112 @@ const getEffectiveSettings = (user, query) => {
     preferredGender: query.gender ?? settings.preferredGender ?? 'Everyone',
     maxDistanceKm: Number(query.distance ?? settings.maxDistanceKm ?? 5000),
     globalMode: (query.global ?? String(settings.globalMode ?? false)) === 'true',
-    education: query.education,
-    religion: query.religion,
-    smoking: query.smoking
+    education: query.education ?? settings.education ?? '',
+    religion: query.religion ?? settings.religion ?? '',
+    smoking: query.smoking ?? settings.smoking ?? '',
+    relationshipIntent: query.relationshipIntent ?? settings.relationshipIntent ?? ''
   };
 };
 
-const upsertMatchExtension = (user, targetUserId, expiresAt) => {
-  const existing = user.matchExtensions.find(
-    (extension) => extension.user.toString() === targetUserId.toString()
-  );
+const ensureUserMatchArrays = async (user1, user2) => {
+  await Promise.all([
+    User.findByIdAndUpdate(user1, { $addToSet: { matches: user2 } }),
+    User.findByIdAndUpdate(user2, { $addToSet: { matches: user1 } })
+  ]);
+};
 
+const removeUserMatchArrays = async (user1, user2) => {
+  await Promise.all([
+    User.findByIdAndUpdate(user1, {
+      $pull: {
+        matches: user2,
+        matchExtensions: { user: user2 }
+      }
+    }),
+    User.findByIdAndUpdate(user2, {
+      $pull: {
+        matches: user1,
+        matchExtensions: { user: user1 }
+      }
+    })
+  ]);
+};
+
+const upsertMatchExtension = (user, targetUserId, expiresAt) => {
+  const existing = user.matchExtensions.find((extension) => extension.user.toString() === targetUserId.toString());
   if (existing) {
     existing.expiresAt = expiresAt;
     existing.extendedAt = new Date();
-    return;
+  } else {
+    user.matchExtensions.push({ user: targetUserId, expiresAt, extendedAt: new Date() });
   }
-
-  user.matchExtensions.push({
-    user: targetUserId,
-    expiresAt,
-    extendedAt: new Date()
-  });
 };
 
-const createMatchSideEffects = async ({ currentUser, likedUser, currentUserId, targetUserId, message, action }) => {
-  await User.findByIdAndUpdate(currentUserId, { $addToSet: { matches: targetUserId } });
-  await User.findByIdAndUpdate(targetUserId, { $addToSet: { matches: currentUserId } });
+const expireOverdueMatches = async (userId) => {
+  const overdueMatches = await MatchRecord.find({
+    status: 'active',
+    expiresAt: { $lt: new Date() },
+    $or: [{ userA: userId }, { userB: userId }]
+  });
+
+  for (const record of overdueMatches) {
+    record.status = 'expired';
+    await record.save();
+    await removeUserMatchArrays(record.userA, record.userB);
+  }
+};
+
+const getOtherUserIdFromRecord = (record, currentUserId) =>
+  record.userA.toString() === currentUserId.toString() ? record.userB : record.userA;
+
+const enrichCandidate = (currentUser, user) => {
+  const distance = haversineKm(getCurrentCoordinates(currentUser), getCurrentCoordinates(user));
+  return {
+    ...user.toObject(),
+    age: calculateAge(user.birthDate),
+    compatibility: calculateCompatibility(currentUser, user),
+    distance,
+    aiIcebreaker: buildAiIcebreaker(currentUser, user),
+    aiSummary: buildAiMatchSummary(currentUser, user),
+    isSaved: (currentUser.savedProfiles || []).some((savedId) => savedId.toString() === user._id.toString())
+  };
+};
+
+const createMatchSideEffects = async ({
+  currentUser,
+  likedUser,
+  currentUserId,
+  targetUserId,
+  message,
+  action,
+  rematched = false
+}) => {
+  const pairQuery = getPairQuery(currentUserId, targetUserId);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + MATCH_DURATION_DAYS * 24 * 60 * 60 * 1000);
+
+  let matchRecord = await MatchRecord.findOne(pairQuery);
+  if (!matchRecord) {
+    matchRecord = await MatchRecord.create({
+      ...pairQuery,
+      matchedByAction: rematched ? 'rematch' : (action === 'instant' ? 'instant' : action),
+      status: 'active',
+      matchedAt: now,
+      expiresAt,
+      rematchedAt: rematched ? now : null,
+      lastInteractionAt: now
+    });
+  } else {
+    matchRecord.status = 'active';
+    matchRecord.matchedByAction = rematched ? 'rematch' : (action === 'instant' ? 'instant' : action);
+    matchRecord.lastInteractionAt = now;
+    matchRecord.expiresAt = expiresAt;
+    if (rematched) matchRecord.rematchedAt = now;
+    if (!matchRecord.matchedAt) matchRecord.matchedAt = now;
+    await matchRecord.save();
+  }
+
+  await ensureUserMatchArrays(currentUserId, targetUserId);
 
   if (message) {
     await Chat.create({
@@ -97,7 +245,23 @@ const createMatchSideEffects = async ({ currentUser, likedUser, currentUserId, t
     });
   }
 
-  return { match: true, superlike: action === 'superlike' };
+  await createNotification({
+    userId: targetUserId,
+    actorId: currentUserId,
+    title: rematched ? 'Rematch active' : 'New match',
+    body: rematched
+      ? `${currentUser.username} opened the match again with you`
+      : `${currentUser.username} matched with you`,
+    type: 'system',
+    data: { targetUserId: currentUserId.toString(), matchRecordId: matchRecord._id.toString() }
+  });
+
+  return {
+    match: true,
+    superlike: action === 'superlike',
+    matchRecordId: matchRecord._id,
+    expiresAt
+  };
 };
 
 const processSwipe = async ({ currentUserId, targetUserId, action, message = '', reactionContext = '' }) => {
@@ -122,13 +286,10 @@ const processSwipe = async ({ currentUserId, targetUserId, action, message = '',
   let existingLike = await Like.findOne({ liker: currentUserId, liked: targetUserId });
 
   if (existingLike) {
-    if (existingLike.type === action) {
-      return { statusCode: 200, payload: { match: false, message: 'Already swiped' } };
-    }
-
     existingLike.type = action;
     existingLike.message = message || existingLike.message;
     existingLike.reactionContext = reactionContext || existingLike.reactionContext;
+    existingLike.isRead = false;
     await existingLike.save();
   } else {
     existingLike = await Like.create({
@@ -152,15 +313,27 @@ const processSwipe = async ({ currentUserId, targetUserId, action, message = '',
     await currentUser.save();
   }
 
-  await User.findByIdAndUpdate(currentUserId, {
-    $addToSet: { swiped: { user: targetUserId, action } }
-  });
+  const existingSwiped = currentUser.swiped.find((entry) => entry.user.toString() === targetUserId.toString());
+  if (existingSwiped) existingSwiped.action = action;
+  else currentUser.swiped.push({ user: targetUserId, action });
+  await currentUser.save();
 
   if (['like', 'superlike', 'react', 'instant'].includes(action)) {
     if (likedUser.missionProgress && !isToday(likedUser.missionProgress.likeReceived.lastClaim)) {
       likedUser.missionProgress.likeReceived.count = (likedUser.missionProgress.likeReceived.count || 0) + 1;
       await likedUser.save();
     }
+
+    await createNotification({
+      userId: targetUserId,
+      actorId: currentUserId,
+      title: action === 'superlike' ? 'New superlike' : 'New like',
+      body: action === 'superlike'
+        ? `${currentUser.username} sent you a superlike`
+        : `${currentUser.username} liked your profile`,
+      type: 'system',
+      data: { targetUserId: currentUserId.toString(), likeType: action }
+    });
 
     const mutualLike = await Like.findOne({
       liker: targetUserId,
@@ -202,11 +375,18 @@ const getDiscoveryQueue = async (req, res) => {
     const currentUser = await User.findById(req.user.id);
     if (!currentUser) return res.status(404).json({ message: 'User not found' });
 
+    await expireOverdueMatches(req.user.id);
+
     const settings = getEffectiveSettings(currentUser, req.query);
     const swipedLikes = await Like.find({ liker: req.user.id }).select('liked');
     const swipedIds = swipedLikes.map((like) => like.liked);
     const blockedIds = currentUser.blockedUsers || [];
-    const excludeIds = [req.user.id, ...swipedIds, ...blockedIds];
+    const activeMatches = await MatchRecord.find({
+      status: 'active',
+      $or: [{ userA: req.user.id }, { userB: req.user.id }]
+    });
+    const activeMatchedUserIds = activeMatches.map((record) => getOtherUserIdFromRecord(record, req.user.id));
+    const excludeIds = [req.user.id, ...swipedIds, ...blockedIds, ...activeMatchedUserIds];
 
     const filter = {
       _id: { $nin: excludeIds },
@@ -214,14 +394,11 @@ const getDiscoveryQueue = async (req, res) => {
     };
 
     if (!settings.globalMode) {
-      const loc = currentUser.travelLocation || currentUser.location;
-      const isValidLocation = loc && Array.isArray(loc.coordinates) && loc.coordinates.length === 2 &&
-        (loc.coordinates[0] !== 0 || loc.coordinates[1] !== 0);
-
-      if (isValidLocation) {
+      const coordinates = getCurrentCoordinates(currentUser);
+      if (coordinates[0] !== 0 || coordinates[1] !== 0) {
         filter.location = {
           $near: {
-            $geometry: { type: 'Point', coordinates: loc.coordinates },
+            $geometry: { type: 'Point', coordinates },
             $maxDistance: settings.maxDistanceKm * 1000
           }
         };
@@ -229,35 +406,32 @@ const getDiscoveryQueue = async (req, res) => {
     }
 
     if (settings.preferredGender && settings.preferredGender !== 'Everyone') {
-      filter.gender = settings.preferredGender === 'Men' ? 'Man' : settings.preferredGender === 'Women' ? 'Woman' : settings.preferredGender;
+      filter.gender = settings.preferredGender === 'Men'
+        ? 'Man'
+        : settings.preferredGender === 'Women'
+          ? 'Woman'
+          : settings.preferredGender;
     }
     if (settings.education) filter.education = settings.education;
     if (settings.religion) filter.religion = settings.religion;
     if (settings.smoking) filter.smoking = settings.smoking;
+    if (settings.relationshipIntent) filter.relationshipIntent = settings.relationshipIntent;
 
     let users = await User.find(filter)
       .select('-password -swiped -matches -blockedUsers')
-      .limit(30);
+      .limit(40);
 
     users = users.filter((user) => {
       const age = calculateAge(user.birthDate);
       return age >= settings.minAge && age <= settings.maxAge;
     });
 
-    if (users.length === 0) {
-      users = await User.find({ _id: { $nin: excludeIds }, accountStatus: 'Active' })
-        .select('-password -swiped -matches -blockedUsers')
-        .limit(20);
-    }
+    const enrichedUsers = users
+      .map((user) => enrichCandidate(currentUser, user))
+      .sort((a, b) => (b.compatibility * 10 - (b.distance || 999)) - (a.compatibility * 10 - (a.distance || 999)))
+      .slice(0, 30);
 
-    const enrichedUsers = users.map((user) => ({
-      ...user.toObject(),
-      age: calculateAge(user.birthDate),
-      compatibility: calculateCompatibility(currentUser, user),
-      distance: currentUser.location && user.location ? 10 : null
-    }));
-
-    res.json(enrichedUsers.sort(() => 0.5 - Math.random()));
+    res.json(enrichedUsers);
   } catch (error) {
     console.error('Discovery Queue Error:', error);
     res.status(500).json({ message: error.message });
@@ -291,19 +465,37 @@ const swipeAction = async (req, res) => {
 
 const getMatches = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id)
-      .populate('matches', 'fullName username profilePic isOnline lastActive');
+    await expireOverdueMatches(req.user.id);
 
-    const extensionMap = new Map(
-      (user.matchExtensions || []).map((extension) => [extension.user.toString(), extension.expiresAt])
-    );
+    const currentUser = await User.findById(req.user.id);
+    const matchRecords = await MatchRecord.find({
+      status: 'active',
+      $or: [{ userA: req.user.id }, { userB: req.user.id }]
+    }).sort({ matchedAt: -1 });
 
-    const matches = user.matches.map((matchUser) => ({
-      ...matchUser.toObject(),
-      extendedUntil: extensionMap.get(matchUser._id.toString()) || null
-    }));
+    const otherUserIds = matchRecords.map((record) => getOtherUserIdFromRecord(record, req.user.id));
+    const users = await User.find({ _id: { $in: otherUserIds } }).select('fullName username profilePic bio birthDate passions zodiacSign religion smoking education relationshipIntent location travelLocation');
+    const userMap = new Map(users.map((user) => [user._id.toString(), user]));
 
-    res.json(matches);
+    const payload = matchRecords
+      .map((record) => {
+        const user = userMap.get(getOtherUserIdFromRecord(record, req.user.id).toString());
+        if (!user) return null;
+        return {
+          ...user.toObject(),
+          age: calculateAge(user.birthDate),
+          compatibility: calculateCompatibility(currentUser, user),
+          extendedUntil: record.expiresAt,
+          expiresAt: record.expiresAt,
+          matchedAt: record.matchedAt,
+          matchRecordId: record._id,
+          aiSummary: buildAiMatchSummary(currentUser, user),
+          aiIcebreaker: buildAiIcebreaker(currentUser, user)
+        };
+      })
+      .filter(Boolean);
+
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -311,20 +503,24 @@ const getMatches = async (req, res) => {
 
 const getWhoLikedMe = async (req, res) => {
   try {
-    const swipedLikes = await Like.find({ liker: req.user.id }).select('liked');
-    const swipedIds = swipedLikes.map((like) => like.liked);
-
+    const currentUser = await User.findById(req.user.id).select('savedProfiles');
     const likes = await Like.find({
       liked: req.user.id,
-      liker: { $nin: swipedIds },
       type: { $in: ['like', 'superlike', 'react', 'instant'] }
-    }).populate('liker', 'fullName username profilePic bio');
+    })
+      .populate('liker', 'fullName username profilePic bio birthDate passions zodiacSign religion smoking education relationshipIntent location travelLocation')
+      .sort({ createdAt: -1 });
 
     res.json(likes.map((like) => ({
-      user: like.liker,
+      user: {
+        ...like.liker.toObject(),
+        age: calculateAge(like.liker.birthDate),
+        isSaved: (currentUser.savedProfiles || []).some((savedId) => savedId.toString() === like.liker._id.toString())
+      },
       type: like.type,
       message: like.message,
-      reactionContext: like.reactionContext
+      reactionContext: like.reactionContext,
+      likedAt: like.createdAt
     })));
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -348,13 +544,38 @@ const logProfileVisit = async (req, res) => {
 
 const findBlindDate = async (req, res) => {
   try {
-    const potentialPartners = await User.find({ _id: { $ne: req.user.id }, accountStatus: 'Active' }).limit(10);
-    if (potentialPartners.length === 0) {
-      return res.status(404).json({ message: 'No users available' });
+    const currentUser = await User.findById(req.user.id);
+    const candidates = await User.find({
+      _id: { $ne: req.user.id, $nin: currentUser.blockedUsers || [] },
+      accountStatus: 'Active'
+    })
+      .limit(25)
+      .select('fullName username profilePic bio birthDate passions zodiacSign religion smoking education relationshipIntent location travelLocation');
+
+    const ranked = candidates
+      .map((candidate) => ({
+        user: candidate,
+        compatibility: calculateCompatibility(currentUser, candidate),
+        distance: haversineKm(getCurrentCoordinates(currentUser), getCurrentCoordinates(candidate))
+      }))
+      .filter((candidate) => (candidate.distance ?? 9999) <= 50)
+      .sort((a, b) => (b.compatibility * 10 - (b.distance ?? 999)) - (a.compatibility * 10 - (a.distance || 999)));
+
+    if (ranked.length === 0) {
+      return res.status(404).json({ message: 'No blind date candidate available yet' });
     }
 
-    const partner = potentialPartners[Math.floor(Math.random() * potentialPartners.length)];
-    res.json({ partnerId: partner._id, username: partner.username });
+    const selected = ranked[0];
+    res.json({
+      partner: enrichCandidate(currentUser, selected.user),
+      suggestedWindow: 'Sabtu 19:00 - 21:00',
+      suggestedVenue: [
+        'Coffee shop yang ramai tapi santai',
+        'Casual dinner tempat terang dan aman',
+        'Public park walk menjelang sunset'
+      ],
+      safetyTip: 'Pilih tempat umum, share lokasi ke teman, dan aktifkan safety check-in sebelum berangkat.'
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -364,16 +585,13 @@ const getTopPicks = async (req, res) => {
   try {
     const currentUser = await User.findById(req.user.id);
     const users = await User.find({ _id: { $ne: req.user.id }, accountStatus: 'Active' })
-      .limit(10)
+      .limit(20)
       .select('-password');
 
     const topPicks = users
-      .map((user) => ({
-        ...user.toObject(),
-        compatibility: calculateCompatibility(currentUser, user),
-        age: calculateAge(user.birthDate)
-      }))
-      .sort((a, b) => b.compatibility - a.compatibility);
+      .map((user) => enrichCandidate(currentUser, user))
+      .sort((a, b) => b.compatibility - a.compatibility)
+      .slice(0, 10);
 
     res.json(topPicks);
   } catch (error) {
@@ -392,7 +610,8 @@ const rewindLastSwipe = async (req, res) => {
     user.coins -= 100;
     await user.save();
     await Like.deleteOne({ _id: lastSwipe._id });
-    await User.findByIdAndUpdate(user._id, { $pull: { swiped: { user: lastSwipe.liked } } });
+    user.swiped = user.swiped.filter((entry) => entry.user.toString() !== lastSwipe.liked.toString());
+    await user.save();
 
     res.status(200).json({ message: 'Rewind successful', newCoinBalance: user.coins });
   } catch (error) {
@@ -418,8 +637,12 @@ const setTravelMode = async (req, res) => {
       ? { travelLocation: { type: 'Point', coordinates } }
       : { travelLocation: null };
 
-    await User.findByIdAndUpdate(req.user.id, { $set: update });
-    res.status(200).json({ message: 'Travel mode updated' });
+    const user = await User.findByIdAndUpdate(req.user.id, { $set: update }, { new: true });
+    res.status(200).json({
+      message: 'Travel mode updated',
+      enabled: Boolean(user.travelLocation),
+      travelLocation: user.travelLocation
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -439,21 +662,14 @@ const unmatchUser = async (req, res) => {
     const { userId } = req.body;
     if (!userId) return res.status(400).json({ message: 'userId is required' });
 
-    await User.findByIdAndUpdate(req.user.id, {
-      $pull: {
-        matches: userId,
-        matchExtensions: { user: userId }
-      },
-      $push: { blockedUsers: userId }
-    });
+    const pairQuery = getPairQuery(req.user.id, userId);
+    const record = await MatchRecord.findOne(pairQuery);
+    if (record) {
+      record.status = 'unmatched';
+      await record.save();
+    }
 
-    await User.findByIdAndUpdate(userId, {
-      $pull: {
-        matches: req.user.id,
-        matchExtensions: { user: req.user.id }
-      }
-    });
-
+    await removeUserMatchArrays(req.user.id, userId);
     await Like.deleteMany({
       $or: [
         { liker: req.user.id, liked: userId },
@@ -461,7 +677,7 @@ const unmatchUser = async (req, res) => {
       ]
     });
 
-    res.json({ message: 'Unmatched and blocked' });
+    res.json({ message: 'Unmatched successfully' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -470,13 +686,8 @@ const unmatchUser = async (req, res) => {
 const reportUser = async (req, res) => {
   try {
     const { userId, reason, details } = req.body;
-    if (!userId || !reason) {
-      return res.status(400).json({ message: 'userId and reason are required' });
-    }
-
-    if (userId === req.user.id) {
-      return res.status(400).json({ message: 'You cannot report yourself' });
-    }
+    if (!userId || !reason) return res.status(400).json({ message: 'userId and reason are required' });
+    if (userId === req.user.id) return res.status(400).json({ message: 'You cannot report yourself' });
 
     const report = await Report.create({
       reporter: req.user.id,
@@ -485,10 +696,7 @@ const reportUser = async (req, res) => {
       details: details || ''
     });
 
-    res.status(201).json({
-      message: 'User reported successfully',
-      report
-    });
+    res.status(201).json({ message: 'User reported successfully', report });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -499,7 +707,6 @@ const getReportHistory = async (req, res) => {
     const reports = await Report.find({ reporter: req.user.id })
       .populate('reportedUser', 'username fullName profilePic')
       .sort({ createdAt: -1 });
-
     res.json(reports);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -511,26 +718,37 @@ const extendMatch = async (req, res) => {
     const { userId } = req.body;
     if (!userId) return res.status(400).json({ message: 'userId is required' });
 
-    const [currentUser, targetUser] = await Promise.all([
+    const pairQuery = getPairQuery(req.user.id, userId);
+    const [record, currentUser, targetUser] = await Promise.all([
+      MatchRecord.findOne(pairQuery),
       User.findById(req.user.id),
       User.findById(userId)
     ]);
 
+    if (!record || record.status !== 'active') return res.status(400).json({ message: 'No active match to extend' });
     if (!currentUser || !targetUser) return res.status(404).json({ message: 'User not found' });
-    if (!currentUser.matches.some((matchId) => matchId.toString() === userId)) {
-      return res.status(400).json({ message: 'You are not matched with this user' });
-    }
 
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const baseDate = record.expiresAt > new Date() ? record.expiresAt : new Date();
+    const expiresAt = new Date(baseDate.getTime() + MATCH_DURATION_DAYS * 24 * 60 * 60 * 1000);
+    record.expiresAt = expiresAt;
+    record.extendedAt = new Date();
+    record.lastInteractionAt = new Date();
+    await record.save();
+
     upsertMatchExtension(currentUser, userId, expiresAt);
     upsertMatchExtension(targetUser, req.user.id, expiresAt);
-
     await Promise.all([currentUser.save(), targetUser.save()]);
 
-    res.json({
-      message: 'Match extended successfully',
-      extendedUntil: expiresAt
+    await createNotification({
+      userId,
+      actorId: req.user.id,
+      title: 'Match extended',
+      body: `${currentUser.username} extended your match time`,
+      type: 'system',
+      data: { targetUserId: req.user.id, expiresAt: expiresAt.toISOString() }
     });
+
+    res.json({ message: 'Match extended successfully', extendedUntil: expiresAt });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -545,24 +763,19 @@ const rematchUser = async (req, res) => {
       User.findById(req.user.id),
       User.findById(userId)
     ]);
-
     if (!currentUser || !targetUser) return res.status(404).json({ message: 'User not found' });
 
-    currentUser.blockedUsers = currentUser.blockedUsers.filter((blockedId) => blockedId.toString() !== userId);
-    targetUser.blockedUsers = targetUser.blockedUsers.filter((blockedId) => blockedId.toString() !== req.user.id);
-    await Promise.all([currentUser.save(), targetUser.save()]);
-
-    const result = await processSwipe({
+    const payload = await createMatchSideEffects({
+      currentUser,
+      likedUser: targetUser,
       currentUserId: req.user.id,
       targetUserId: userId,
-      action: 'instant',
-      message: 'Rematch activated'
+      action: 'rematch',
+      message: 'Rematch activated',
+      rematched: true
     });
 
-    res.status(result.statusCode).json({
-      ...result.payload,
-      rematched: result.statusCode < 400
-    });
+    res.json({ ...payload, rematched: true });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -573,24 +786,32 @@ const instantMatch = async (req, res) => {
     const { targetUserId, message } = req.body;
     if (!targetUserId) return res.status(400).json({ message: 'targetUserId is required' });
 
-    const currentUser = await User.findById(req.user.id);
-    if (!currentUser) return res.status(404).json({ message: 'User not found' });
+    const [currentUser, targetUser] = await Promise.all([
+      User.findById(req.user.id),
+      User.findById(targetUserId)
+    ]);
+    if (!currentUser || !targetUser) return res.status(404).json({ message: 'User not found' });
     if (currentUser.coins < 500) return res.status(400).json({ message: 'Insufficient coins' });
 
     currentUser.coins -= 500;
     await currentUser.save();
 
-    const result = await processSwipe({
+    await Like.findOneAndUpdate(
+      { liker: req.user.id, liked: targetUserId },
+      { $set: { type: 'instant', message: message || 'Instant match activated', isRead: false } },
+      { upsert: true, new: true }
+    );
+
+    const payload = await createMatchSideEffects({
+      currentUser,
+      likedUser: targetUser,
       currentUserId: req.user.id,
       targetUserId,
       action: 'instant',
       message: message || 'Instant match activated'
     });
 
-    res.status(result.statusCode).json({
-      ...result.payload,
-      newCoinBalance: currentUser.coins
-    });
+    res.json({ ...payload, bypassedQueue: true, newCoinBalance: currentUser.coins });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -598,24 +819,38 @@ const instantMatch = async (req, res) => {
 
 const pokeUser = async (req, res) => {
   try {
-    const { userId } = req.body;
+    const { userId, message = 'Hey, kamu lagi lewat di pikiranku.' } = req.body;
     if (!userId) return res.status(400).json({ message: 'userId is required' });
 
-    const [currentUser, targetUser] = await Promise.all([
+    const [currentUser, targetUser, recentPoke] = await Promise.all([
       User.findById(req.user.id),
-      User.findById(userId)
+      User.findById(userId),
+      Poke.findOne({ sender: req.user.id, receiver: userId }).sort({ createdAt: -1 })
     ]);
-
     if (!currentUser || !targetUser) return res.status(404).json({ message: 'User not found' });
 
+    if (recentPoke && Date.now() - new Date(recentPoke.createdAt).getTime() < 12 * 60 * 60 * 1000) {
+      return res.status(400).json({ message: 'You can poke this user again after 12 hours' });
+    }
+
+    const poke = await Poke.create({ sender: req.user.id, receiver: userId, message });
     await Chat.create({
       sender: req.user.id,
       receiver: userId,
-      message: `${currentUser.username} poked you`,
+      message: `Poke from ${currentUser.username}: ${message}`,
       type: 'system'
     });
 
-    res.json({ message: 'User poked successfully' });
+    await createNotification({
+      userId,
+      actorId: req.user.id,
+      title: 'New poke',
+      body: `${currentUser.username} poked you`,
+      type: 'system',
+      data: { targetUserId: req.user.id, pokeId: poke._id.toString() }
+    });
+
+    res.json({ message: 'User poked successfully', poke });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -625,16 +860,13 @@ const getDailyRecommendations = async (req, res) => {
   try {
     const currentUser = await User.findById(req.user.id);
     const users = await User.find({ _id: { $ne: req.user.id }, accountStatus: 'Active' })
-      .limit(5)
-      .select('fullName username profilePic bio birthDate passions zodiacSign religion smoking');
+      .limit(15)
+      .select('fullName username profilePic bio birthDate passions zodiacSign religion smoking education relationshipIntent location travelLocation');
 
     const recommendations = users
-      .map((user) => ({
-        ...user.toObject(),
-        age: calculateAge(user.birthDate),
-        compatibility: calculateCompatibility(currentUser, user)
-      }))
-      .sort((a, b) => b.compatibility - a.compatibility);
+      .map((user) => enrichCandidate(currentUser, user))
+      .sort((a, b) => b.compatibility - a.compatibility)
+      .slice(0, 6);
 
     res.json(recommendations);
   } catch (error) {
@@ -652,10 +884,10 @@ const resetDislikes = async (req, res) => {
     await user.save();
 
     const dislikes = await Like.find({ liker: req.user.id, type: 'dislike' });
-    const dislikedIds = dislikes.map((dislike) => dislike.liked);
-
+    const dislikedIds = dislikes.map((dislike) => dislike.liked.toString());
     await Like.deleteMany({ liker: req.user.id, type: 'dislike' });
-    await User.findByIdAndUpdate(req.user.id, { $pull: { swiped: { user: { $in: dislikedIds } } } });
+    user.swiped = user.swiped.filter((entry) => !dislikedIds.includes(entry.user.toString()));
+    await user.save();
 
     res.json({ message: 'Dislikes reset', newCoinBalance: user.coins });
   } catch (error) {
@@ -671,7 +903,11 @@ const updateMatchSettings = async (req, res) => {
       maxDistanceKm,
       preferredGender,
       globalMode,
-      autoReply
+      autoReply,
+      education,
+      religion,
+      smoking,
+      relationshipIntent
     } = req.body;
 
     const user = await User.findById(req.user.id);
@@ -683,13 +919,229 @@ const updateMatchSettings = async (req, res) => {
     if (preferredGender !== undefined) user.matchSettings.preferredGender = preferredGender;
     if (globalMode !== undefined) user.matchSettings.globalMode = globalMode === true || globalMode === 'true';
     if (autoReply !== undefined) user.matchSettings.autoReply = autoReply;
+    if (education !== undefined) user.matchSettings.education = education;
+    if (religion !== undefined) user.matchSettings.religion = religion;
+    if (smoking !== undefined) user.matchSettings.smoking = smoking;
+    if (relationshipIntent !== undefined) user.matchSettings.relationshipIntent = relationshipIntent;
 
     await user.save();
+    res.json({ message: 'Match settings updated', settings: user.matchSettings });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
 
-    res.json({
-      message: 'Match settings updated',
-      settings: user.matchSettings
+const toggleSavedProfile = async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ message: 'userId is required' });
+
+    const user = await User.findById(req.user.id);
+    const alreadySaved = user.savedProfiles.some((savedId) => savedId.toString() === userId);
+    if (alreadySaved) {
+      user.savedProfiles = user.savedProfiles.filter((savedId) => savedId.toString() !== userId);
+    } else {
+      user.savedProfiles.push(userId);
+    }
+    await user.save();
+
+    res.json({ saved: !alreadySaved, savedProfilesCount: user.savedProfiles.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getSavedProfiles = async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user.id).populate('savedProfiles', 'fullName username profilePic bio birthDate passions zodiacSign religion smoking education relationshipIntent location travelLocation');
+    const payload = currentUser.savedProfiles.map((user) => enrichCandidate(currentUser, user));
+    res.json(payload);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getNearbyUsers = async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user.id);
+    const coordinates = getCurrentCoordinates(currentUser);
+    const users = await User.find({
+      _id: { $ne: req.user.id },
+      accountStatus: 'Active'
+    })
+      .limit(20)
+      .select('fullName username profilePic bio birthDate passions zodiacSign religion smoking education relationshipIntent location travelLocation');
+
+    const payload = users
+      .map((user) => {
+        const location = getCurrentCoordinates(user);
+        const distance = haversineKm(coordinates, location);
+        return {
+          ...enrichCandidate(currentUser, user),
+          coordinates: location,
+          distance,
+          radarX: Number((((location[0] || 0) - (coordinates[0] || 0)) * 10000).toFixed(2)),
+          radarY: Number((((location[1] || 0) - (coordinates[1] || 0)) * 10000).toFixed(2))
+        };
+      })
+      .filter((user) => user.distance !== null)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 12);
+
+    res.json(payload);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getAiIcebreaker = async (req, res) => {
+  try {
+    const [currentUser, targetUser] = await Promise.all([
+      User.findById(req.user.id),
+      User.findById(req.params.userId)
+    ]);
+    if (!currentUser || !targetUser) return res.status(404).json({ message: 'User not found' });
+    res.json({ icebreaker: buildAiIcebreaker(currentUser, targetUser) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getAiMatchSummary = async (req, res) => {
+  try {
+    const [currentUser, targetUser] = await Promise.all([
+      User.findById(req.user.id),
+      User.findById(req.params.userId)
+    ]);
+    if (!currentUser || !targetUser) return res.status(404).json({ message: 'User not found' });
+    res.json({ summary: buildAiMatchSummary(currentUser, targetUser) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const saveDateAvailability = async (req, res) => {
+  try {
+    const { slots = [] } = req.body;
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user.dateAvailability = Array.isArray(slots) ? slots : [];
+    await user.save();
+    res.json({ message: 'Availability updated', slots: user.dateAvailability });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const createDatePlan = async (req, res) => {
+  try {
+    const { inviteeId, scheduledAt, locationLabel, vibe, note } = req.body;
+    if (!inviteeId || !scheduledAt || !locationLabel) {
+      return res.status(400).json({ message: 'inviteeId, scheduledAt, and locationLabel are required' });
+    }
+
+    const datePlan = await DatePlan.create({
+      creator: req.user.id,
+      invitee: inviteeId,
+      scheduledAt,
+      locationLabel,
+      vibe: vibe || '',
+      note: note || ''
     });
+
+    await createNotification({
+      userId: inviteeId,
+      actorId: req.user.id,
+      title: 'New date plan',
+      body: `${req.user.username} sent you a date invitation`,
+      type: 'system',
+      data: { datePlanId: datePlan._id.toString(), targetUserId: req.user.id }
+    });
+
+    res.status(201).json(await DatePlan.findById(datePlan._id)
+      .populate('creator', 'username fullName profilePic')
+      .populate('invitee', 'username fullName profilePic'));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getDatePlans = async (req, res) => {
+  try {
+    const plans = await DatePlan.find({
+      $or: [{ creator: req.user.id }, { invitee: req.user.id }]
+    })
+      .populate('creator', 'username fullName profilePic')
+      .populate('invitee', 'username fullName profilePic')
+      .sort({ scheduledAt: 1 });
+
+    res.json(plans);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const updateDatePlanStatus = async (req, res) => {
+  try {
+    const { status } = req.body;
+    const plan = await DatePlan.findById(req.params.id);
+    if (!plan) return res.status(404).json({ message: 'Date plan not found' });
+    if (![plan.creator.toString(), plan.invitee.toString()].includes(req.user.id)) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+    plan.status = status;
+    await plan.save();
+    res.json(plan);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const createSafetyCheckIn = async (req, res) => {
+  try {
+    const { partnerId, datePlanId, scheduledFor, locationLabel, emergencyNote } = req.body;
+    if (!partnerId || !scheduledFor) return res.status(400).json({ message: 'partnerId and scheduledFor are required' });
+
+    const checkIn = await SafetyCheckIn.create({
+      user: req.user.id,
+      partner: partnerId,
+      datePlan: datePlanId || null,
+      scheduledFor,
+      locationLabel: locationLabel || '',
+      emergencyNote: emergencyNote || ''
+    });
+
+    res.status(201).json(await SafetyCheckIn.findById(checkIn._id)
+      .populate('partner', 'username fullName profilePic')
+      .populate('datePlan'));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getSafetyCheckIns = async (req, res) => {
+  try {
+    const checkins = await SafetyCheckIn.find({ user: req.user.id })
+      .populate('partner', 'username fullName profilePic')
+      .populate('datePlan')
+      .sort({ scheduledFor: -1 });
+
+    res.json(checkins);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const markSafetyCheckInSafe = async (req, res) => {
+  try {
+    const checkIn = await SafetyCheckIn.findOne({ _id: req.params.id, user: req.user.id });
+    if (!checkIn) return res.status(404).json({ message: 'Safety check-in not found' });
+
+    checkIn.status = 'safe';
+    checkIn.checkedInAt = new Date();
+    await checkIn.save();
+    res.json(checkIn);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -716,5 +1168,17 @@ module.exports = {
   pokeUser,
   getDailyRecommendations,
   resetDislikes,
-  updateMatchSettings
+  updateMatchSettings,
+  toggleSavedProfile,
+  getSavedProfiles,
+  getNearbyUsers,
+  getAiIcebreaker,
+  getAiMatchSummary,
+  saveDateAvailability,
+  createDatePlan,
+  getDatePlans,
+  updateDatePlanStatus,
+  createSafetyCheckIn,
+  getSafetyCheckIns,
+  markSafetyCheckInSafe
 };

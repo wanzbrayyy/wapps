@@ -208,6 +208,7 @@ const sendMessage = async (req, res) => {
         chatData.fileInfo = {
           url: mediaUrl || '',
           name: stickerLabel || 'Sticker',
+          label: stickerLabel || 'Sticker',
           mimeType: 'image/png',
           thumbnail: mediaUrl || '',
           stickerId: stickerId || ''
