@@ -4,6 +4,7 @@ const {
   getDiscoveryQueue,
   swipeAction,
   getMatches,
+  getMatchHistory,
   getWhoLikedMe,
   logProfileVisit,
   findBlindDate,
@@ -28,6 +29,7 @@ const {
   getAiIcebreaker,
   getAiMatchSummary,
   saveDateAvailability,
+  getDateAvailability,
   createDatePlan,
   getDatePlans,
   updateDatePlanStatus,
@@ -38,6 +40,7 @@ const {
 const { protect } = require('../middleware/authMiddleware');
 router.get('/discovery', protect, getDiscoveryQueue);
 router.get('/matches', protect, getMatches);
+router.get('/history', protect, getMatchHistory);
 router.get('/likes', protect, getWhoLikedMe);
 router.get('/top-picks', protect, getTopPicks);
 router.get('/daily-recommendations', protect, getDailyRecommendations);
@@ -46,6 +49,7 @@ router.get('/nearby', protect, getNearbyUsers);
 router.get('/ai/icebreaker/:userId', protect, getAiIcebreaker);
 router.get('/ai/summary/:userId', protect, getAiMatchSummary);
 router.get('/date-plans', protect, getDatePlans);
+router.get('/availability', protect, getDateAvailability);
 router.get('/safety-checkins', protect, getSafetyCheckIns);
 router.get('/report-history', protect, getReportHistory);
 router.post('/swipe', protect, swipeAction);

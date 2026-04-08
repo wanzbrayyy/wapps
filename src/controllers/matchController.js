@@ -179,6 +179,23 @@ const enrichCandidate = (currentUser, user) => {
   };
 };
 
+const buildMatchPayload = (currentUser, user, record) => ({
+  ...user.toObject(),
+  age: calculateAge(user.birthDate),
+  compatibility: calculateCompatibility(currentUser, user),
+  extendedUntil: record.expiresAt,
+  expiresAt: record.expiresAt,
+  matchedAt: record.matchedAt,
+  matchRecordId: record._id,
+  matchStatus: record.status,
+  rematchedAt: record.rematchedAt,
+  lastInteractionAt: record.lastInteractionAt,
+  isSaved: (currentUser.savedProfiles || []).some((savedId) => savedId.toString() === user._id.toString()),
+  canRematch: ['expired', 'unmatched'].includes(record.status),
+  aiSummary: buildAiMatchSummary(currentUser, user),
+  aiIcebreaker: buildAiIcebreaker(currentUser, user)
+});
+
 const createMatchSideEffects = async ({
   currentUser,
   likedUser,
@@ -467,7 +484,7 @@ const getMatches = async (req, res) => {
   try {
     await expireOverdueMatches(req.user.id);
 
-    const currentUser = await User.findById(req.user.id);
+    const currentUser = await User.findById(req.user.id).select('savedProfiles passions zodiacSign religion smoking education relationshipIntent birthDate location travelLocation');
     const matchRecords = await MatchRecord.find({
       status: 'active',
       $or: [{ userA: req.user.id }, { userB: req.user.id }]
@@ -481,21 +498,39 @@ const getMatches = async (req, res) => {
       .map((record) => {
         const user = userMap.get(getOtherUserIdFromRecord(record, req.user.id).toString());
         if (!user) return null;
-        return {
-          ...user.toObject(),
-          age: calculateAge(user.birthDate),
-          compatibility: calculateCompatibility(currentUser, user),
-          extendedUntil: record.expiresAt,
-          expiresAt: record.expiresAt,
-          matchedAt: record.matchedAt,
-          matchRecordId: record._id,
-          aiSummary: buildAiMatchSummary(currentUser, user),
-          aiIcebreaker: buildAiIcebreaker(currentUser, user)
-        };
+        return buildMatchPayload(currentUser, user, record);
       })
       .filter(Boolean);
 
     res.json(payload);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getMatchHistory = async (req, res) => {
+  try {
+    await expireOverdueMatches(req.user.id);
+
+    const currentUser = await User.findById(req.user.id).select('savedProfiles passions zodiacSign religion smoking education relationshipIntent birthDate location travelLocation');
+    const matchRecords = await MatchRecord.find({
+      status: { $in: ['expired', 'unmatched'] },
+      $or: [{ userA: req.user.id }, { userB: req.user.id }]
+    }).sort({ updatedAt: -1, expiresAt: -1 });
+
+    const otherUserIds = matchRecords.map((record) => getOtherUserIdFromRecord(record, req.user.id));
+    const users = await User.find({ _id: { $in: otherUserIds } }).select('fullName username profilePic bio birthDate passions zodiacSign religion smoking education relationshipIntent location travelLocation');
+    const userMap = new Map(users.map((user) => [user._id.toString(), user]));
+
+    res.json(
+      matchRecords
+        .map((record) => {
+          const user = userMap.get(getOtherUserIdFromRecord(record, req.user.id).toString());
+          if (!user) return null;
+          return buildMatchPayload(currentUser, user, record);
+        })
+        .filter(Boolean)
+    );
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1034,6 +1069,16 @@ const saveDateAvailability = async (req, res) => {
   }
 };
 
+const getDateAvailability = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('dateAvailability');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user.dateAvailability || []);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const createDatePlan = async (req, res) => {
   try {
     const { inviteeId, scheduledAt, locationLabel, vibe, note } = req.body;
@@ -1151,6 +1196,7 @@ module.exports = {
   getDiscoveryQueue,
   swipeAction,
   getMatches,
+  getMatchHistory,
   getWhoLikedMe,
   logProfileVisit,
   findBlindDate,
@@ -1175,6 +1221,7 @@ module.exports = {
   getAiIcebreaker,
   getAiMatchSummary,
   saveDateAvailability,
+  getDateAvailability,
   createDatePlan,
   getDatePlans,
   updateDatePlanStatus,
