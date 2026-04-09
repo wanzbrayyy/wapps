@@ -1,37 +1,14 @@
-const mongoose = require('mongoose');
-const axios = require('axios');
-const FormData = require('form-data');
-const { Readable } = require('stream');
+﻿const mongoose = require('mongoose');
 const Chat = require('../models/chat');
 const ChatPreference = require('../models/chatPreference');
 const User = require('../models/user');
-const cloudinary = require('../config/cloudinary');
 const { createNotification } = require('../services/notificationService');
+const { uploadBufferToR2 } = require('../services/r2Service');
 
 const isToday = (someDate) => {
   if (!someDate) return false;
   const today = new Date();
   return new Date(someDate).toDateString() === today.toDateString();
-};
-
-const streamUpload = (buffer, folder, resourceType = 'auto') => {
-  return new Promise((resolve, reject) => {
-    if (!buffer) return reject(new Error('Upload failed: Buffer is empty'));
-
-    const stream = cloudinary.uploader.upload_stream(
-      { folder, resource_type: resourceType },
-      (error, result) => {
-        if (result) resolve(result);
-        else reject(error);
-      }
-    );
-
-    try {
-      Readable.from(buffer).pipe(stream);
-    } catch (err) {
-      reject(err);
-    }
-  });
 };
 
 const enrichChat = (query) => query
@@ -66,66 +43,33 @@ const buildForwardedPayload = async ({ forwardFrom, message, senderId, receiverI
 const uploadMultipartFile = async (req, type, message) => {
   if (!req.file) return {};
 
-  if (req.file.buffer && ['image', 'audio', 'video'].includes(type)) {
-    const resourceType = type === 'image' ? 'image' : 'video';
-    const folder = `wapps_chat_${type}s`;
-    const result = await streamUpload(req.file.buffer, folder, resourceType);
+  const folder = {
+    image: 'chat/images',
+    video: 'chat/videos',
+    audio: 'chat/audios',
+    file: 'chat/files'
+  }[type] || 'chat/files';
 
-    return {
-      fileInfo: {
-        url: result.secure_url,
-        name: req.file.originalname,
-        size: req.file.size,
-        mimeType: req.file.mimetype,
-        duration: req.body.duration ? parseFloat(req.body.duration) : (result.duration || 0),
-        thumbnail: type === 'video' ? result.secure_url.replace(/\.[^/.]+$/, '.jpg') : null
-      },
-      message: message || type.charAt(0).toUpperCase() + type.slice(1)
-    };
-  }
-
-  if (req.file.buffer && type === 'file') {
-    try {
-      const form = new FormData();
-      form.append('reqtype', 'fileupload');
-      if (process.env.CATBOX_USER_HASH) form.append('userhash', process.env.CATBOX_USER_HASH);
-      form.append('fileToUpload', req.file.buffer, req.file.originalname);
-
-      const response = await axios.post('https://catbox.moe/user/api.php', form, {
-        headers: form.getHeaders(),
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity
-      });
-
-      return {
-        fileInfo: {
-          url: response.data.toString().trim(),
-          name: req.file.originalname,
-          size: req.file.size,
-          mimeType: req.file.mimetype
-        },
-        message: message || req.file.originalname
-      };
-    } catch (catboxError) {
-      const result = await streamUpload(req.file.buffer, 'wapps_chat_files', 'raw');
-      return {
-        fileInfo: {
-          url: result.secure_url,
-          name: req.file.originalname,
-          size: req.file.size,
-          mimeType: req.file.mimetype
-        },
-        message: message || req.file.originalname
-      };
-    }
-  }
+  const uploaded = await uploadBufferToR2(
+    req.file.buffer,
+    {
+      folder,
+      originalName: req.file.originalname,
+      contentType: req.file.mimetype
+    },
+    req
+  );
 
   return {
     fileInfo: {
-      url: req.file.path || req.file.secure_url || '',
+      url: uploaded.url,
+      downloadUrl: uploaded.downloadUrl,
+      storageKey: uploaded.key,
       name: req.file.originalname,
       size: req.file.size,
-      mimeType: req.file.mimetype
+      mimeType: req.file.mimetype,
+      duration: req.body.duration ? parseFloat(req.body.duration) : 0,
+      thumbnail: type === 'video' ? uploaded.url : ''
     },
     message: message || req.file.originalname
   };
@@ -325,7 +269,7 @@ const deleteMessage = async (req, res) => {
       }
 
       chat.deletedForEveryone = true;
-      chat.message = 'This message was deleted';
+      chat.message = 'Pesan ini telah dihapus';
       chat.fileInfo = undefined;
       chat.location = undefined;
       chat.forwardedFrom = null;
@@ -372,7 +316,7 @@ const toggleStarMessage = async (req, res) => {
 
 const bulkMessageAction = async (req, res) => {
   try {
-    const { chatIds = [], action, targetUserId } = req.body;
+    const { chatIds = [], action, targetUserId, targetUserIds = [] } = req.body;
     if (!Array.isArray(chatIds) || chatIds.length === 0) {
       return res.status(400).json({ message: 'chatIds is required' });
     }
@@ -397,7 +341,7 @@ const bulkMessageAction = async (req, res) => {
       await Promise.all(
         ownChats.map((chat) => {
           chat.deletedForEveryone = true;
-          chat.message = 'This message was deleted';
+          chat.message = 'Pesan ini telah dihapus';
           chat.fileInfo = undefined;
           chat.location = undefined;
           chat.forwardedFrom = null;
@@ -429,18 +373,29 @@ const bulkMessageAction = async (req, res) => {
     }
 
     if (action === 'forward') {
-      if (!targetUserId) return res.status(400).json({ message: 'targetUserId is required for forward' });
+      const resolvedTargetIds = [
+        ...(targetUserId ? [targetUserId] : []),
+        ...(Array.isArray(targetUserIds) ? targetUserIds : [])
+      ]
+        .map((userId) => userId?.toString?.() || '')
+        .filter(Boolean);
+
+      if (resolvedTargetIds.length === 0) {
+        return res.status(400).json({ message: 'targetUserId or targetUserIds is required for forward' });
+      }
 
       const forwarded = [];
-      for (const chat of chats) {
-        const payload = await buildForwardedPayload({
-          forwardFrom: chat._id,
-          message: chat.message,
-          senderId: req.user.id,
-          receiverId: targetUserId
-        });
-        const newChat = await Chat.create(payload);
-        forwarded.push(newChat);
+      for (const receiverId of [...new Set(resolvedTargetIds)]) {
+        for (const chat of chats) {
+          const payload = await buildForwardedPayload({
+            forwardFrom: chat._id,
+            message: chat.message,
+            senderId: req.user.id,
+            receiverId
+          });
+          const newChat = await Chat.create(payload);
+          forwarded.push(newChat);
+        }
       }
 
       return res.json({ message: 'Messages forwarded', processed: forwarded.length });
@@ -484,16 +439,20 @@ const getMessages = async (req, res) => {
 
 const setChatPreference = async (req, res) => {
   try {
-    const { targetUserId, isPinned, isArchived, isMuted } = req.body;
-    let wallpaperUrl;
+    const { targetUserId, isPinned, isArchived, isMuted, wallpaper } = req.body;
+    let wallpaperUrl = wallpaper || '';
 
-    if (req.file) {
-      if (req.file.buffer) {
-        const result = await streamUpload(req.file.buffer, 'wapps_wallpapers', 'image');
-        wallpaperUrl = result.secure_url;
-      } else {
-        wallpaperUrl = req.file.path || req.file.secure_url;
-      }
+    if (req.file?.buffer) {
+      const uploaded = await uploadBufferToR2(
+        req.file.buffer,
+        {
+          folder: 'chat/wallpapers',
+          originalName: req.file.originalname,
+          contentType: req.file.mimetype
+        },
+        req
+      );
+      wallpaperUrl = uploaded.url;
     }
 
     const updateData = {};
@@ -628,3 +587,5 @@ module.exports = {
   addReaction,
   setChatPreference
 };
+
+

@@ -18,11 +18,17 @@ const roomMessageSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['text', 'image', 'system', 'gif', 'sticker'],
+    enum: ['text', 'image', 'video', 'audio', 'file', 'system', 'gif', 'sticker'],
     default: 'text'
   },
   fileInfo: {
     url: { type: String, default: '' },
+    downloadUrl: { type: String, default: '' },
+    storageKey: { type: String, default: '' },
+    name: { type: String, default: '' },
+    mimeType: { type: String, default: '' },
+    size: { type: Number, default: 0 },
+    thumbnail: { type: String, default: '' },
     stickerId: { type: String, default: '' },
     label: { type: String, default: '' }
   },
@@ -39,6 +45,7 @@ const roomMessageSchema = new mongoose.Schema({
   },
   isPinned: { type: Boolean, default: false },
   pinnedAt: { type: Date, default: null },
+  deletedForEveryone: { type: Boolean, default: false },
   pinnedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

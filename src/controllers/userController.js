@@ -1,5 +1,6 @@
 const User = require('../models/user');
-const cloudinary = require('cloudinary').v2;
+const UserMedia = require('../models/userMedia');
+const { uploadBufferToR2, deleteObjectFromR2 } = require('../services/r2Service');
 
 const parseArrayField = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean);
@@ -18,6 +19,18 @@ const isToday = (someDate) => {
   if (!someDate) return false;
   const today = new Date();
   return new Date(someDate).toDateString() === today.toDateString();
+};
+
+const attachGalleryItems = async (user) => {
+  const galleryItems = await UserMedia.find({ owner: user._id })
+    .populate('likes', 'username profilePic fullName')
+    .populate('comments.user', 'username profilePic fullName')
+    .sort({ createdAt: -1 });
+
+  const payload = user.toObject();
+  payload.galleryItems = galleryItems;
+  payload.gallery = galleryItems.map((item) => item.url);
+  return payload;
 };
 
 const getAllUsers = async (req, res) => {
@@ -66,7 +79,7 @@ const getProfile = async (req, res) => {
     user.lastActive = new Date();
     await user.save();
 
-    res.json(user);
+    res.json(await attachGalleryItems(user));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -103,7 +116,9 @@ const getUserById = async (req, res) => {
       (follower) => follower._id.toString() === req.user.id
     );
 
-    res.json({ ...user.toObject(), isFollowing });
+    const payload = await attachGalleryItems(user);
+    payload.isFollowing = isFollowing;
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -184,13 +199,40 @@ const uploadGalleryImages = async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    const incomingUrls = req.files.map((file) => file.path).filter(Boolean);
-    user.gallery = [...(user.gallery || []), ...incomingUrls].slice(0, 12);
+    const createdMedia = [];
+    for (const file of req.files) {
+      const type = file.mimetype.startsWith('video/') ? 'video' : 'image';
+      const upload = await uploadBufferToR2(
+        file.buffer,
+        {
+          folder: `profile/${type}s`,
+          originalName: file.originalname,
+          contentType: file.mimetype
+        },
+        req
+      );
+
+      createdMedia.push(await UserMedia.create({
+        owner: user._id,
+        url: upload.url,
+        downloadUrl: upload.downloadUrl,
+        storageKey: upload.key,
+        type,
+        mimeType: file.mimetype,
+        name: file.originalname,
+        thumbnail: type === 'video' ? upload.url : '',
+        size: file.size
+      }));
+    }
+
+    const latestGallery = await UserMedia.find({ owner: user._id }).sort({ createdAt: -1 }).limit(12);
+    user.gallery = latestGallery.map((item) => item.url);
     await user.save();
 
     res.json({
       message: 'Gallery updated',
-      gallery: user.gallery
+      gallery: user.gallery,
+      galleryItems: createdMedia
     });
   } catch (error) {
     res.status(500).json({ message: 'Gallery upload failed: ' + error.message });
@@ -199,19 +241,73 @@ const uploadGalleryImages = async (req, res) => {
 
 const deleteGalleryImage = async (req, res) => {
   try {
-    const { imageUrl } = req.body;
-    if (!imageUrl) return res.status(400).json({ message: 'imageUrl is required' });
+    const { imageUrl, mediaId } = req.body;
+    if (!imageUrl && !mediaId) return res.status(400).json({ message: 'imageUrl or mediaId is required' });
 
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    user.gallery = (user.gallery || []).filter((url) => url !== imageUrl);
+    const media = await UserMedia.findOne({
+      owner: req.user.id,
+      ...(mediaId ? { _id: mediaId } : { url: imageUrl })
+    });
+
+    if (!media) return res.status(404).json({ message: 'Gallery item not found' });
+
+    await deleteObjectFromR2(media.storageKey).catch(() => null);
+    await media.deleteOne();
+
+    const latestGallery = await UserMedia.find({ owner: req.user.id }).sort({ createdAt: -1 }).limit(12);
+    user.gallery = latestGallery.map((item) => item.url);
     await user.save();
 
     res.json({
-      message: 'Gallery image removed',
-      gallery: user.gallery
+      message: 'Gallery item removed',
+      gallery: user.gallery,
+      galleryItems: latestGallery
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const toggleGalleryLike = async (req, res) => {
+  try {
+    const media = await UserMedia.findById(req.params.mediaId)
+      .populate('likes', 'username profilePic fullName')
+      .populate('comments.user', 'username profilePic fullName');
+    if (!media) return res.status(404).json({ message: 'Gallery item not found' });
+
+    const liked = media.likes.some((userId) => userId._id?.toString?.() === req.user.id || userId.toString() === req.user.id);
+    if (liked) {
+      media.likes = media.likes.filter((userId) => (userId._id?.toString?.() || userId.toString()) !== req.user.id);
+    } else {
+      media.likes.push(req.user.id);
+    }
+    await media.save();
+
+    res.json(await UserMedia.findById(media._id)
+      .populate('likes', 'username profilePic fullName')
+      .populate('comments.user', 'username profilePic fullName'));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const addGalleryComment = async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text?.trim()) return res.status(400).json({ message: 'Comment text is required' });
+
+    const media = await UserMedia.findById(req.params.mediaId);
+    if (!media) return res.status(404).json({ message: 'Gallery item not found' });
+
+    media.comments.push({ user: req.user.id, text: text.trim() });
+    await media.save();
+
+    res.status(201).json(await UserMedia.findById(media._id)
+      .populate('likes', 'username profilePic fullName')
+      .populate('comments.user', 'username profilePic fullName'));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -222,11 +318,17 @@ const uploadProfilePic = async (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
     const user = await User.findById(req.user.id);
-    if (user.cloudinaryId) {
-      cloudinary.uploader.destroy(user.cloudinaryId).catch(err => console.log(err));
-    }
-    user.profilePic = req.file.path;
-    user.cloudinaryId = req.file.filename;
+    const upload = await uploadBufferToR2(
+      req.file.buffer,
+      {
+        folder: 'profile/avatar',
+        originalName: req.file.originalname,
+        contentType: req.file.mimetype
+      },
+      req
+    );
+    user.profilePic = upload.url;
+    user.cloudinaryId = upload.key;
     await user.save();
 
     res.json({ profilePic: user.profilePic });
@@ -330,6 +432,8 @@ module.exports = {
   uploadProfilePic,
   uploadGalleryImages,
   deleteGalleryImage,
+  toggleGalleryLike,
+  addGalleryComment,
   getUserById,
   followUser,
   unfollowUser,

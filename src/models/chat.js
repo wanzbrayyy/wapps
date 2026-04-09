@@ -1,12 +1,14 @@
-const mongoose = require('mongoose');
+﻿const mongoose = require('mongoose');
 const fileInfoSchema = new mongoose.Schema({
   url: String,
+  downloadUrl: String,
+  storageKey: String,
   name: String,
   label: String,
   stickerId: String,
   size: Number,
   mimeType: String,
-  duration: Number, 
+  duration: Number,
   thumbnail: String
 }, { _id: false });
 const locationSchema = new mongoose.Schema({
@@ -49,3 +51,4 @@ chatSchema.index({ "expireAt": 1 }, { expireAfterSeconds: 0 });
 chatSchema.index({ sender: 1, receiver: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Chat', chatSchema);
+

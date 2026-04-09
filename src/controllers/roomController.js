@@ -3,6 +3,7 @@ const Room = require('../models/room');
 const RoomMessage = require('../models/roomMessage');
 const User = require('../models/user');
 const { createNotification } = require('../services/notificationService');
+const { uploadBufferToR2 } = require('../services/r2Service');
 
 const isToday = (someDate) => {
   if (!someDate) return false;
@@ -97,7 +98,19 @@ const attachThreadCounts = (messages) => {
 const createRoom = async (req, res) => {
   try {
     const { title, category, description, roomImage } = req.body;
-    const resolvedRoomImage = req.file?.path || roomImage;
+    let resolvedRoomImage = roomImage;
+    if (req.file?.buffer) {
+      const upload = await uploadBufferToR2(
+        req.file.buffer,
+        {
+          folder: 'rooms/cover',
+          originalName: req.file.originalname,
+          contentType: req.file.mimetype
+        },
+        req
+      );
+      resolvedRoomImage = upload.url;
+    }
     const newRoom = await Room.create({
       title,
       category,
@@ -120,7 +133,20 @@ const updateRoomImage = async (req, res) => {
     if (!room) return res.status(404).json({ message: 'Room not found' });
     if (!canManageRoom(room, req.user.id)) return res.status(403).json({ message: 'Not authorized' });
 
-    room.roomImage = req.file?.path || imageUrl || room.roomImage;
+    if (req.file?.buffer) {
+      const upload = await uploadBufferToR2(
+        req.file.buffer,
+        {
+          folder: 'rooms/cover',
+          originalName: req.file.originalname,
+          contentType: req.file.mimetype
+        },
+        req
+      );
+      room.roomImage = upload.url;
+    } else {
+      room.roomImage = imageUrl || room.roomImage;
+    }
     await room.save();
     res.json(await populateRoomQuery(Room.findById(room._id)));
   } catch (error) {
@@ -303,7 +329,7 @@ const sendRoomMessage = async (req, res) => {
       if (!replyMessage) return res.status(404).json({ message: 'Reply target not found' });
     }
 
-    const resolvedType = ['gif', 'sticker', 'image', 'system'].includes(type) ? type : 'text';
+    const resolvedType = ['gif', 'sticker', 'image', 'video', 'audio', 'file', 'system'].includes(type) ? type : 'text';
     const mentionIds = resolveMentionedUserIds(room, message, mentionedUserIds);
 
     const payload = {
@@ -331,6 +357,30 @@ const sendRoomMessage = async (req, res) => {
         label: stickerLabel || 'Sticker'
       };
       payload.message = message || stickerLabel || 'Sent a sticker';
+    }
+
+    if (req.file?.buffer && ['image', 'video', 'audio', 'file'].includes(resolvedType)) {
+      const upload = await uploadBufferToR2(
+        req.file.buffer,
+        {
+          folder: `rooms/${resolvedType}s`,
+          originalName: req.file.originalname,
+          contentType: req.file.mimetype
+        },
+        req
+      );
+
+      payload.fileInfo = {
+        url: upload.url,
+        downloadUrl: upload.downloadUrl,
+        storageKey: upload.key,
+        name: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        thumbnail: resolvedType === 'video' ? upload.url : '',
+        label: req.file.originalname
+      };
+      payload.message = message || req.file.originalname;
     }
 
     if (resolvedType === 'text' && !payload.message.trim()) {
@@ -488,6 +538,67 @@ const unpinRoomMessage = async (req, res) => {
   }
 };
 
+const deleteRoomMessage = async (req, res) => {
+  try {
+    const room = await Room.findById(req.params.id);
+    if (!room) return res.status(404).json({ message: 'Room not found' });
+
+    const roomMessage = await RoomMessage.findOne({
+      _id: req.params.messageId,
+      room: room._id
+    });
+    if (!roomMessage) return res.status(404).json({ message: 'Message not found' });
+
+    const canDeleteEveryone = roomMessage.sender.toString() === req.user.id || canManageRoom(room, req.user.id);
+    if (!canDeleteEveryone) return res.status(403).json({ message: 'Not authorized' });
+
+    roomMessage.deletedForEveryone = true;
+    roomMessage.message = 'Pesan ini telah dihapus';
+    roomMessage.fileInfo = undefined;
+    roomMessage.replyTo = null;
+    roomMessage.mentions = [];
+    await roomMessage.save();
+
+    if (room.pinnedMessage?.toString() === roomMessage._id.toString()) {
+      room.pinnedMessage = null;
+      await room.save();
+    }
+
+    res.json(await populateRoomMessageQuery(RoomMessage.findById(roomMessage._id)));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const warnUser = async (req, res) => {
+  try {
+    const { userId, reason = '' } = req.body;
+    const room = await Room.findById(req.params.id);
+    if (!room) return res.status(404).json({ message: 'Room not found' });
+    if (!canManageRoom(room, req.user.id)) return res.status(403).json({ message: 'Not authorized' });
+
+    room.warnings.push({
+      user: userId,
+      warnedBy: req.user.id,
+      reason
+    });
+    await room.save();
+
+    await createNotification({
+      userId,
+      actorId: req.user.id,
+      title: 'Room warning',
+      body: `${req.user.username} gave you a warning in ${room.title}`,
+      type: 'room_warning',
+      data: { roomId: room._id.toString(), reason }
+    });
+
+    res.json(await populateRoomQuery(Room.findById(room._id)));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   createRoom,
   updateRoomImage,
@@ -504,5 +615,7 @@ module.exports = {
   getRoomMessages,
   getThreadMessages,
   pinRoomMessage,
-  unpinRoomMessage
+  unpinRoomMessage,
+  deleteRoomMessage,
+  warnUser
 };

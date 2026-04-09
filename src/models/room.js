@@ -23,6 +23,13 @@ const roomSchema = new mongoose.Schema({
 
   pinnedMessage: { type: mongoose.Schema.Types.ObjectId, ref: 'RoomMessage', default: null },
 
+  warnings: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    warnedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    reason: { type: String, default: '' },
+    createdAt: { type: Date, default: Date.now }
+  }],
+
   events: [eventSchema]
 }, { timestamps: true });
 

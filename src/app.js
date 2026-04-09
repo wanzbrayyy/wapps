@@ -8,6 +8,7 @@ const matchRoutes = require('./routes/matchRoutes');
 const missionRoutes = require('./routes/missionRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const callRoutes = require('./routes/callRoutes');
+const mediaRoutes = require('./routes/mediaRoutes');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 
 // Menangkap error "Unhandled Rejection: [object Object]" agar terbaca di Log
@@ -42,6 +43,7 @@ app.use('/api/match', matchRoutes);
 app.use('/api/missions', missionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/calls', callRoutes);
+app.use('/api/media', mediaRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
