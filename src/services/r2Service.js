@@ -29,44 +29,40 @@ const getSigningKey = (dateStamp) => {
 };
 
 const encodePathSegment = (value = '') => encodeURIComponent(value).replace(/%2F/g, '/');
+const encodeQueryComponent = (value = '') => encodeURIComponent(value)
+  .replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 
-const buildSignedRequest = ({
+const buildPresignedUrl = ({
   method,
   key,
-  payload = Buffer.alloc(0),
-  contentType = 'application/octet-stream',
-  extraHeaders = {},
-  queryString = ''
+  expiresIn = 300
 }) => {
   const { amzDate, dateStamp } = getAmzDateParts();
   const canonicalUri = `/${R2_BUCKET_NAME}/${key.split('/').map(encodePathSegment).join('/')}`;
-  const payloadHash = hashSha256Hex(payload);
-  const headers = {
-    host: R2_HOST,
-    'x-amz-content-sha256': payloadHash,
-    'x-amz-date': amzDate,
-    ...extraHeaders
+  const credentialScope = `${dateStamp}/${R2_REGION}/s3/aws4_request`;
+  const signedHeaders = 'host';
+  const queryParams = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': `${R2_ACCESS_KEY_ID}/${credentialScope}`,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': String(expiresIn),
+    'X-Amz-SignedHeaders': signedHeaders
   };
 
-  if (contentType) {
-    headers['content-type'] = contentType;
-  }
+  const canonicalQueryString = Object.keys(queryParams)
+    .sort()
+    .map((keyName) => `${encodeQueryComponent(keyName)}=${encodeQueryComponent(queryParams[keyName])}`)
+    .join('&');
 
-  const sortedHeaderKeys = Object.keys(headers).sort();
-  const canonicalHeaders = sortedHeaderKeys
-    .map((header) => `${header}:${String(headers[header]).trim()}\n`)
-    .join('');
-  const signedHeaders = sortedHeaderKeys.join(';');
   const canonicalRequest = [
     method,
     canonicalUri,
-    queryString,
-    canonicalHeaders,
+    canonicalQueryString,
+    `host:${R2_HOST}\n`,
     signedHeaders,
-    payloadHash
+    'UNSIGNED-PAYLOAD'
   ].join('\n');
 
-  const credentialScope = `${dateStamp}/${R2_REGION}/s3/aws4_request`;
   const stringToSign = [
     'AWS4-HMAC-SHA256',
     amzDate,
@@ -75,19 +71,7 @@ const buildSignedRequest = ({
   ].join('\n');
 
   const signature = hmac(getSigningKey(dateStamp), stringToSign, 'hex');
-  const authorization = [
-    `AWS4-HMAC-SHA256 Credential=${R2_ACCESS_KEY_ID}/${credentialScope}`,
-    `SignedHeaders=${signedHeaders}`,
-    `Signature=${signature}`
-  ].join(', ');
-
-  return {
-    url: `${R2_ENDPOINT}${canonicalUri}${queryString ? `?${queryString}` : ''}`,
-    headers: {
-      ...headers,
-      Authorization: authorization
-    }
-  };
+  return `${R2_ENDPOINT}${canonicalUri}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
 };
 
 const buildStorageKey = (folder, originalName = 'file.bin') => {
@@ -111,17 +95,19 @@ const buildMediaProxyUrl = (req, key, download = false) => {
 
 const uploadBufferToR2 = async (buffer, { folder, originalName, contentType }, req = null) => {
   const key = buildStorageKey(folder, originalName);
-  const { url, headers } = buildSignedRequest({
+  const url = buildPresignedUrl({
     method: 'PUT',
-    key,
-    payload: buffer,
-    contentType
+    key
   });
 
   await axios.put(url, buffer, {
-    headers,
+    headers: {
+      'Content-Type': contentType || 'application/octet-stream',
+      'x-amz-content-sha256': 'UNSIGNED-PAYLOAD'
+    },
     maxBodyLength: Infinity,
-    maxContentLength: Infinity
+    maxContentLength: Infinity,
+    timeout: 30000
   });
 
   return {
@@ -132,28 +118,24 @@ const uploadBufferToR2 = async (buffer, { folder, originalName, contentType }, r
 };
 
 const streamObjectFromR2 = async (key) => {
-  const { url, headers } = buildSignedRequest({
+  const url = buildPresignedUrl({
     method: 'GET',
-    key,
-    payload: '',
-    contentType: ''
+    key
   });
 
   return axios.get(url, {
-    headers,
-    responseType: 'stream'
+    responseType: 'stream',
+    timeout: 30000
   });
 };
 
 const deleteObjectFromR2 = async (key) => {
-  const { url, headers } = buildSignedRequest({
+  const url = buildPresignedUrl({
     method: 'DELETE',
-    key,
-    payload: '',
-    contentType: ''
+    key
   });
 
-  await axios.delete(url, { headers });
+  await axios.delete(url, { timeout: 30000 });
 };
 
 module.exports = {

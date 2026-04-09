@@ -1,6 +1,9 @@
+const axios = require('axios');
 const User = require('../models/user');
 const UserMedia = require('../models/userMedia');
 const { uploadBufferToR2, deleteObjectFromR2 } = require('../services/r2Service');
+
+const SPOTIFY_SEARCH_API_KEY = 'Milik-Bot-OurinMD';
 
 const parseArrayField = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean);
@@ -21,16 +24,233 @@ const isToday = (someDate) => {
   return new Date(someDate).toDateString() === today.toDateString();
 };
 
-const attachGalleryItems = async (user) => {
+const normalizeSpotifyAnthem = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? { title: trimmed, spotifyUrl: '', artist: '', coverUrl: '', previewUrl: '', downloadUrl: '' } : null;
+  }
+
+  if (typeof value !== 'object') return null;
+
+  const normalized = {
+    title: String(value.title || value.name || '').trim(),
+    artist: String(value.artist || value.subtitle || '').trim(),
+    album: String(value.album || '').trim(),
+    spotifyUrl: String(value.spotifyUrl || value.url || '').trim(),
+    coverUrl: String(value.coverUrl || value.thumbnail || value.image || '').trim(),
+    previewUrl: String(value.previewUrl || value.audioPreviewUrl || '').trim(),
+    downloadUrl: String(value.downloadUrl || value.audioUrl || '').trim(),
+    durationLabel: String(value.durationLabel || value.duration || '').trim(),
+    durationSeconds: Number(value.durationSeconds || value.durationMs / 1000 || 0),
+    popularity: Number(value.popularity || 0),
+    source: String(value.source || 'spotify').trim()
+  };
+
+  return Object.values(normalized).some((entry) => entry) ? normalized : null;
+};
+
+const serializeProfileUser = (entry) => {
+  if (!entry) return null;
+  const user = entry.toObject ? entry.toObject() : entry;
+  return {
+    _id: user._id,
+    username: user.username || '',
+    fullName: user.fullName || '',
+    profilePic: user.profilePic || ''
+  };
+};
+
+const serializeGalleryItem = (item, viewerId, { commentLimit = 8, likeLimit = 12 } = {}) => {
+  const payload = item.toObject ? item.toObject() : item;
+  const likes = (payload.likes || []).map(serializeProfileUser).filter(Boolean);
+  const comments = (payload.comments || []).slice(-commentLimit).map((comment) => ({
+    _id: comment._id,
+    text: comment.text || '',
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+    user: serializeProfileUser(comment.user)
+  }));
+
+  return {
+    _id: payload._id,
+    owner: payload.owner,
+    url: payload.url,
+    downloadUrl: payload.downloadUrl,
+    type: payload.type,
+    mimeType: payload.mimeType || '',
+    name: payload.name || '',
+    caption: payload.caption || '',
+    thumbnail: payload.thumbnail || payload.url,
+    size: payload.size || 0,
+    createdAt: payload.createdAt,
+    updatedAt: payload.updatedAt,
+    likes: likes.slice(0, likeLimit),
+    comments,
+    likesCount: likes.length,
+    commentsCount: (payload.comments || []).length,
+    hasLiked: likes.some((user) => user?._id?.toString() === viewerId?.toString())
+  };
+};
+
+const attachGalleryItems = async (user, viewerId, { limit = 18 } = {}) => {
   const galleryItems = await UserMedia.find({ owner: user._id })
     .populate('likes', 'username profilePic fullName')
     .populate('comments.user', 'username profilePic fullName')
     .sort({ createdAt: -1 });
 
   const payload = user.toObject();
-  payload.galleryItems = galleryItems;
-  payload.gallery = galleryItems.map((item) => item.url);
+  const serializedItems = galleryItems.slice(0, limit).map((item) => serializeGalleryItem(item, viewerId));
+  payload.galleryItems = serializedItems;
+  payload.gallery = serializedItems.map((item) => item.url);
+  payload.galleryCount = galleryItems.length;
+  payload.spotifyAnthem = normalizeSpotifyAnthem(payload.spotifyAnthem);
   return payload;
+};
+
+const enrichSpotifySearchResult = async (entry) => {
+  const title = String(entry.title || entry.name || '').trim();
+  const artist = String(entry.artist || entry.artists || '').trim();
+  const searchTerm = [title, artist].filter(Boolean).join(' ').trim() || String(entry.query || '').trim();
+
+  let previewUrl = '';
+  let coverUrl = String(entry.thumbnail || entry.image || '').trim();
+  let durationSeconds = 0;
+  let resolvedArtist = artist;
+  try {
+    if (searchTerm) {
+      const response = await axios.get('https://itunes.apple.com/search', {
+        params: {
+          term: searchTerm,
+          media: 'music',
+          limit: 1
+        },
+        timeout: 12000
+      });
+      const match = response.data?.results?.[0];
+      if (match) {
+        previewUrl = match.previewUrl || '';
+        coverUrl = coverUrl || match.artworkUrl100 || '';
+        durationSeconds = Math.round((match.trackTimeMillis || 0) / 1000);
+        resolvedArtist = resolvedArtist || match.artistName || '';
+      }
+    }
+  } catch (_) {}
+
+  return {
+    title,
+    artist: resolvedArtist,
+    spotifyUrl: String(entry.url || entry.spotifyUrl || '').trim(),
+    coverUrl,
+    previewUrl,
+    downloadUrl: previewUrl,
+    durationLabel: String(entry.duration || '').trim(),
+    durationSeconds,
+    popularity: Number(entry.popularity || 0),
+    source: 'spotify'
+  };
+};
+
+const getMyGallery = async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
+    const limit = Math.min(24, Math.max(1, parseInt(req.query.limit || '18', 10)));
+    const skip = (page - 1) * limit;
+
+    const [items, total] = await Promise.all([
+      UserMedia.find({ owner: req.user.id })
+        .populate('likes', 'username profilePic fullName')
+        .populate('comments.user', 'username profilePic fullName')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      UserMedia.countDocuments({ owner: req.user.id })
+    ]);
+
+    res.json({
+      items: items.map((item) => serializeGalleryItem(item, req.user.id)),
+      page,
+      limit,
+      total,
+      hasMore: skip + items.length < total
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getGalleryItemDetail = async (req, res) => {
+  try {
+    const media = await UserMedia.findById(req.params.mediaId)
+      .populate('likes', 'username profilePic fullName')
+      .populate('comments.user', 'username profilePic fullName');
+    if (!media) return res.status(404).json({ message: 'Gallery item not found' });
+
+    res.json(serializeGalleryItem(media, req.user.id, { commentLimit: 100, likeLimit: 50 }));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const searchSpotify = async (req, res) => {
+  try {
+    const query = String(req.query.q || '').trim();
+    if (!query) return res.status(400).json({ message: 'Search query is required' });
+
+    const response = await axios.get('https://api.neoxr.eu/api/spotify-search', {
+      params: {
+        q: query,
+        apikey: SPOTIFY_SEARCH_API_KEY
+      },
+      timeout: 15000
+    });
+
+    const list = Array.isArray(response.data?.data) ? response.data.data.slice(0, 8) : [];
+    const items = await Promise.all(list.map((entry) => enrichSpotifySearchResult(entry)));
+    res.json({ items });
+  } catch (error) {
+    const message = error.response?.data?.message || error.message || 'Spotify search failed';
+    res.status(500).json({ message });
+  }
+};
+
+const resolveSpotifyAnthem = async (req, res) => {
+  try {
+    const normalized = normalizeSpotifyAnthem(req.body || {});
+    if (!normalized) return res.status(400).json({ message: 'Spotify anthem data is required' });
+
+    const [title, artist] = [normalized.title, normalized.artist].filter(Boolean);
+    const searchTerm = [title, artist].filter(Boolean).join(' ').trim();
+    if (searchTerm && (!normalized.previewUrl || !normalized.coverUrl)) {
+      try {
+        const response = await axios.get('https://itunes.apple.com/search', {
+          params: {
+            term: searchTerm,
+            media: 'music',
+            limit: 1
+          },
+          timeout: 12000
+        });
+        const match = response.data?.results?.[0];
+        if (match) {
+          normalized.previewUrl = normalized.previewUrl || match.previewUrl || '';
+          normalized.downloadUrl = normalized.downloadUrl || match.previewUrl || '';
+          normalized.coverUrl = normalized.coverUrl || match.artworkUrl100 || '';
+          normalized.artist = normalized.artist || match.artistName || '';
+          normalized.durationSeconds = normalized.durationSeconds || Math.round((match.trackTimeMillis || 0) / 1000);
+          normalized.durationLabel = normalized.durationLabel || (normalized.durationSeconds
+            ? `${Math.floor(normalized.durationSeconds / 60)}:${String(normalized.durationSeconds % 60).padStart(2, '0')}`
+            : '');
+        }
+      } catch (_) {}
+    }
+
+    res.json(normalized);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };
 
 const getAllUsers = async (req, res) => {
@@ -79,7 +299,7 @@ const getProfile = async (req, res) => {
     user.lastActive = new Date();
     await user.save();
 
-    res.json(await attachGalleryItems(user));
+    res.json(await attachGalleryItems(user, req.user.id));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -116,7 +336,7 @@ const getUserById = async (req, res) => {
       (follower) => follower._id.toString() === req.user.id
     );
 
-    const payload = await attachGalleryItems(user);
+    const payload = await attachGalleryItems(user, req.user.id);
     payload.isFollowing = isFollowing;
     res.json(payload);
   } catch (error) {
@@ -138,17 +358,17 @@ const updateProfile = async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    if (fullName) user.fullName = fullName;
-    if (bio) user.bio = bio;
-    if (birthDate) user.birthDate = birthDate;
-    if (gender) user.gender = gender;
-    if (interestedIn) user.interestedIn = interestedIn;
-    if (height) user.height = height;
-    if (education) user.education = education;
-    if (religion) user.religion = religion;
-    if (smoking) user.smoking = smoking;
-    if (relationshipIntent) user.relationshipIntent = relationshipIntent;
-    if (zodiacSign || zodiac) user.zodiacSign = zodiacSign || zodiac;
+    if (fullName !== undefined) user.fullName = fullName;
+    if (bio !== undefined) user.bio = bio;
+    if (birthDate !== undefined) user.birthDate = birthDate || null;
+    if (gender !== undefined) user.gender = gender || undefined;
+    if (interestedIn !== undefined) user.interestedIn = interestedIn || undefined;
+    if (height !== undefined) user.height = height || null;
+    if (education !== undefined) user.education = education;
+    if (religion !== undefined) user.religion = religion;
+    if (smoking !== undefined) user.smoking = smoking || undefined;
+    if (relationshipIntent !== undefined) user.relationshipIntent = relationshipIntent || undefined;
+    if (zodiacSign !== undefined || zodiac !== undefined) user.zodiacSign = zodiacSign || zodiac || '';
     if (mbti !== undefined) user.mbti = mbti;
     if (passions !== undefined) user.passions = parseArrayField(passions);
 
@@ -160,10 +380,10 @@ const updateProfile = async (req, res) => {
     }
     
     if (gallery !== undefined) user.gallery = parseArrayField(gallery);
-    if (voiceBio) user.voiceBio = voiceBio;
-    if (videoBio) user.videoBio = videoBio;
-    if (instagramHandle) user.instagramHandle = instagramHandle;
-    if (spotifyAnthem) user.spotifyAnthem = spotifyAnthem;
+    if (voiceBio !== undefined) user.voiceBio = voiceBio;
+    if (videoBio !== undefined) user.videoBio = videoBio;
+    if (instagramHandle !== undefined) user.instagramHandle = instagramHandle;
+    if (spotifyAnthem !== undefined) user.spotifyAnthem = normalizeSpotifyAnthem(spotifyAnthem);
     
     if (accountStatus) user.accountStatus = accountStatus;
     if (isOnline !== undefined) user.isOnline = isOnline;
@@ -184,7 +404,7 @@ const updateProfile = async (req, res) => {
         await updatedUser.save();
     }
     
-    res.json(updatedUser);
+    res.json(await attachGalleryItems(updatedUser, req.user.id));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -232,7 +452,7 @@ const uploadGalleryImages = async (req, res) => {
     res.json({
       message: 'Gallery updated',
       gallery: user.gallery,
-      galleryItems: createdMedia
+      galleryItems: createdMedia.map((item) => serializeGalleryItem(item, req.user.id))
     });
   } catch (error) {
     res.status(500).json({ message: 'Gallery upload failed: ' + error.message });
@@ -264,7 +484,7 @@ const deleteGalleryImage = async (req, res) => {
     res.json({
       message: 'Gallery item removed',
       gallery: user.gallery,
-      galleryItems: latestGallery
+      galleryItems: latestGallery.map((item) => serializeGalleryItem(item, req.user.id))
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -286,9 +506,10 @@ const toggleGalleryLike = async (req, res) => {
     }
     await media.save();
 
-    res.json(await UserMedia.findById(media._id)
+    const updated = await UserMedia.findById(media._id)
       .populate('likes', 'username profilePic fullName')
-      .populate('comments.user', 'username profilePic fullName'));
+      .populate('comments.user', 'username profilePic fullName');
+    res.json(serializeGalleryItem(updated, req.user.id, { commentLimit: 100, likeLimit: 50 }));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -305,9 +526,10 @@ const addGalleryComment = async (req, res) => {
     media.comments.push({ user: req.user.id, text: text.trim() });
     await media.save();
 
-    res.status(201).json(await UserMedia.findById(media._id)
+    const updated = await UserMedia.findById(media._id)
       .populate('likes', 'username profilePic fullName')
-      .populate('comments.user', 'username profilePic fullName'));
+      .populate('comments.user', 'username profilePic fullName');
+    res.status(201).json(serializeGalleryItem(updated, req.user.id, { commentLimit: 100, likeLimit: 50 }));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -428,6 +650,10 @@ const unblockUser = async (req, res) => {
 module.exports = {
   getAllUsers,
   getProfile,
+  getMyGallery,
+  getGalleryItemDetail,
+  searchSpotify,
+  resolveSpotifyAnthem,
   updateProfile,
   uploadProfilePic,
   uploadGalleryImages,

@@ -20,8 +20,8 @@ process.on('unhandledRejection', (reason, promise) => {
 const app = express();
 
 app.use(cors({ origin: '*' }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 // Fix 404 Halaman Utama
 app.get('/', (req, res) => {

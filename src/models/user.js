@@ -84,7 +84,7 @@ const userSchema = new mongoose.Schema({
   voiceBio: { type: String, default: '' },
   videoBio: { type: String, default: '' },
   instagramHandle: { type: String, default: '' },
-  spotifyAnthem: { type: String, default: '' },
+  spotifyAnthem: { type: mongoose.Schema.Types.Mixed, default: null },
 
   swiped: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, action: { type: String, enum: ['like', 'dislike', 'superlike'] } }],
   matches: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

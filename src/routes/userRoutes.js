@@ -3,6 +3,10 @@ const router = express.Router();
 const { 
   getAllUsers,
   getProfile, 
+  getMyGallery,
+  getGalleryItemDetail,
+  searchSpotify,
+  resolveSpotifyAnthem,
   updateProfile, 
   uploadProfilePic,
   uploadGalleryImages,
@@ -20,6 +24,10 @@ const upload = require('../middleware/uploadMiddleware');
 
 router.get('/', protect, getAllUsers);
 router.get('/profile', protect, getProfile);
+router.get('/gallery', protect, getMyGallery);
+router.get('/gallery/:mediaId', protect, getGalleryItemDetail);
+router.get('/spotify/search', protect, searchSpotify);
+router.post('/spotify/resolve', protect, resolveSpotifyAnthem);
 router.put('/profile', protect, updateProfile);
 router.post('/upload-profile-pic', protect, upload.single('profilePic'), uploadProfilePic);
 router.post('/gallery', protect, upload.array('gallery', 12), uploadGalleryImages);
