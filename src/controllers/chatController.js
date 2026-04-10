@@ -96,6 +96,9 @@ const createMessageNotification = async ({ senderId, receiverId, senderName, mes
     type: 'chat_message',
     data: {
       chatUserId: senderId.toString(),
+      senderId: senderId.toString(),
+      targetUserId: senderId.toString(),
+      senderName,
       messageId: messageId.toString()
     }
   });
